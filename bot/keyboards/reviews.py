@@ -15,19 +15,23 @@ from bot.database.models import (
     LANG_RU,
     LANG_UZ,
     ROLE_EVALUATED,
+    ROLE_EVALUATOR,
     STATUS_BOOKED,
     STATUS_OPEN,
     TrackedEvent,
 )
 from bot.keyboards.menu import normalize_language
 
+# Minimum advance notice for booking or creating slots on the current day
+MIN_BOOKING_LEAD_MINUTES: int = 15
+
 
 class SlotWizardCB(CallbackData, prefix="sw"):
     """
     Compact wizard callbacks.
 
-    ``act``: date | sh | sm | eh | em | back | cancel
-    ``val``: day offset (0..6), hour (8..23), or minute (0/15/30/45)
+    ``act``: date | sh | sm | eh | em | fmt | disabled | back | cancel
+    ``val``: day offset (0..6), hour (8..23), minute (0/15/30/45), or format (0=offline, 1=online)
     """
 
     act: str
@@ -66,10 +70,15 @@ _LABELS = {
         "cancel": "❌ Cancel",
         "today": "📅 Today",
         "tomorrow": "📅 Tomorrow",
-        "make_offline": "🌐 Make Offline",
-        "make_online": "🌐 Make Online",
-        "role_evaluator": "👨‍🏫 (Checking)",
-        "role_evaluated": "👨‍🎓 (Being checked)",
+        "make_offline": "🏢 Switch to Offline",
+        "make_online": "🌐 Switch to Online",
+        "format_online": "🌐 Online",
+        "format_offline": "🏢 Offline",
+        "category_evaluator": "🔍 I am checking",
+        "category_evaluated": "📖 Being checked",
+        "time_unavailable": "Time unavailable",
+        "status_free": "⏳ Free",
+        "all_categories": "📋 All slots",
     },
     LANG_RU: {
         "create_slot": "➕ Создать слот",
@@ -81,10 +90,15 @@ _LABELS = {
         "cancel": "❌ Отмена",
         "today": "📅 Сегодня",
         "tomorrow": "📅 Завтра",
-        "make_offline": "🌐 Сделать Офлайн",
-        "make_online": "🌐 Сделать Онлайн",
-        "role_evaluator": "👨‍🏫 (Проверяю)",
-        "role_evaluated": "👨‍🎓 (Проверяют меня)",
+        "make_offline": "🏢 Переключить на Офлайн",
+        "make_online": "🌐 Переключить на Онлайн",
+        "format_online": "🌐 Онлайн",
+        "format_offline": "🏢 Офлайн",
+        "category_evaluator": "🔍 Я проверяющий",
+        "category_evaluated": "📖 Меня проверяют",
+        "time_unavailable": "Время недоступно",
+        "status_free": "⏳ Свободен",
+        "all_categories": "📋 Все слоты",
     },
     LANG_UZ: {
         "create_slot": "➕ Slot yaratish",
@@ -96,10 +110,15 @@ _LABELS = {
         "cancel": "❌ Bekor qilish",
         "today": "📅 Bugun",
         "tomorrow": "📅 Ertaga",
-        "make_offline": "🌐 Offline qilish",
-        "make_online": "🌐 Online qilish",
-        "role_evaluator": "👨‍🏫 (Tekshiraman)",
-        "role_evaluated": "👨‍🎓 (Meni tekshiradi)",
+        "make_offline": "🏢 Offlinega o‘tkazish",
+        "make_online": "🌐 Onlinega o‘tkazish",
+        "format_online": "🌐 Online",
+        "format_offline": "🏢 Offline",
+        "category_evaluator": "🔍 Men tekshiruvchiman",
+        "category_evaluated": "📖 Meni tekshirishadi",
+        "time_unavailable": "Vaqt mavjud emas",
+        "status_free": "⏳ Bo‘sh",
+        "all_categories": "📋 Barcha slotlar",
     },
 }
 
@@ -131,24 +150,71 @@ def build_empty_slots_kb(
 def build_slots_list_kb(
     slots: list[TrackedEvent],
     language: str | None = None,
+    category_filter: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
-    """List of active slots as date/time interval buttons with role markers."""
+    """
+    Categorized slots list:
+    1. 🔍 Evaluator (I check)
+    2. 📖 Evaluated (Being checked)
+
+    No textual '(Проверяю)' suffixes. Clear navigation and filters.
+    """
     builder = InlineKeyboardBuilder()
     lang = normalize_language(language)
-    for slot in slots:
+
+    evaluator_slots = [s for s in slots if s.effective_role == ROLE_EVALUATOR]
+    evaluated_slots = [s for s in slots if s.effective_role == ROLE_EVALUATED]
+
+    # Category switcher buttons at the top
+    evaluator_count = len(evaluator_slots)
+    evaluated_count = len(evaluated_slots)
+
+    builder.row(
+        InlineKeyboardButton(
+            text=f"🔍 ({evaluator_count})",
+            callback_data="slot_cat:evaluator",
+        ),
+        InlineKeyboardButton(
+            text=f"📖 ({evaluated_count})",
+            callback_data="slot_cat:evaluated",
+        ),
+        InlineKeyboardButton(
+            text=f"📋 ({len(slots)})",
+            callback_data="slot_cat:all",
+        ),
+    )
+
+    # Determine which slots to show based on filter
+    slots_to_render = slots
+    if category_filter == "evaluator":
+        slots_to_render = evaluator_slots
+    elif category_filter == "evaluated":
+        slots_to_render = evaluated_slots
+
+    for slot in slots_to_render:
         if slot.id is None:
             continue
         when = format_datetime(slot.start_time, slot.end_time, language=lang)
+        is_online = bool(slot.data.get("is_online"))
+        fmt_str = "🌐" if is_online else "🏢"
+
         if slot.effective_role == ROLE_EVALUATED:
-            prefix = _t(lang, "role_evaluated")
+            peer = slot.data.get("peer_login") or "..."
+            label = f"📖 {when} · {peer} {fmt_str}"
         else:
-            prefix = _t(lang, "role_evaluator")
+            if slot.status == STATUS_OPEN:
+                label = f"🔍 {when} · ⏳ {fmt_str}"
+            else:
+                peer = slot.data.get("peer_login") or "..."
+                label = f"🔍 {when} · {peer} {fmt_str}"
+
         builder.row(
             InlineKeyboardButton(
-                text=f"{prefix} {when}",
+                text=label,
                 callback_data=f"slot_view:{slot.id}",
             )
         )
+
     builder.row(
         InlineKeyboardButton(
             text=_t(language, "create_slot"),
@@ -169,9 +235,7 @@ def build_slot_card_kb(
     language: str | None = None,
 ) -> InlineKeyboardMarkup:
     """
-    Detail actions depending on OPEN vs BOOKED and user role.
-
-    Evaluated users cannot manage slot time — only Back is shown.
+    Slot card detail actions with format toggle and clear navigation.
     """
     builder = InlineKeyboardBuilder()
     if slot.id is None:
@@ -183,32 +247,30 @@ def build_slot_card_kb(
         )
         return builder.as_markup()
 
-    # Evaluated (being checked) cannot delete / reschedule / toggle.
-    if slot.effective_role == ROLE_EVALUATED:
-        builder.row(
-            InlineKeyboardButton(
-                text=_t(language, "back"),
-                callback_data="menu_reviews",
-            )
-        )
-        return builder.as_markup()
+    is_online = bool(slot.data.get("is_online"))
+    toggle_key = "make_offline" if is_online else "make_online"
 
-    if slot.status == STATUS_OPEN:
+    # Evaluator can edit time, delete, or toggle online/offline
+    if slot.effective_role == ROLE_EVALUATOR:
+        if slot.status == STATUS_OPEN:
+            builder.row(
+                InlineKeyboardButton(
+                    text=_t(language, "delete"),
+                    callback_data=f"slot_delete:{slot.id}",
+                ),
+                InlineKeyboardButton(
+                    text=_t(language, "edit_time"),
+                    callback_data=f"slot_edit:{slot.id}",
+                ),
+            )
         builder.row(
             InlineKeyboardButton(
-                text=_t(language, "delete"),
-                callback_data=f"slot_delete:{slot.id}",
+                text=_t(language, toggle_key),
+                callback_data=f"slot_toggle_online:{slot.id}",
             )
         )
-        builder.row(
-            InlineKeyboardButton(
-                text=_t(language, "edit_time"),
-                callback_data=f"slot_edit:{slot.id}",
-            )
-        )
-    elif slot.status == STATUS_BOOKED:
-        is_online = bool(slot.data.get("is_online"))
-        toggle_key = "make_offline" if is_online else "make_online"
+    else:
+        # Evaluated user can also toggle format if needed
         builder.row(
             InlineKeyboardButton(
                 text=_t(language, toggle_key),
@@ -220,13 +282,11 @@ def build_slot_card_kb(
         InlineKeyboardButton(
             text=_t(language, "back"),
             callback_data="menu_reviews",
-        )
-    )
-    builder.row(
+        ),
         InlineKeyboardButton(
             text=_t(language, "back_menu"),
             callback_data="menu_home",
-        )
+        ),
     )
     return builder.as_markup()
 
@@ -265,12 +325,7 @@ def build_date_picker_kb(
     language: str | None = None,
     highlight_offset: Optional[int] = None,
 ) -> InlineKeyboardMarkup:
-    """
-    Step 1: Today, Tomorrow, and 5 more days ahead.
-
-    ``highlight_offset`` marks the slot's current day when editing.
-    No Back button on this step — only Cancel.
-    """
+    """Step 1: Today, Tomorrow, and 5 more days ahead."""
     lang = normalize_language(language)
     builder = InlineKeyboardBuilder()
     now_local = utc_now().astimezone(TASHKENT_TZ)
@@ -312,30 +367,79 @@ def build_date_picker_kb(
     return builder.as_markup()
 
 
+def _is_slot_time_valid_today(
+    hour: int,
+    minute: int,
+    now_local: datetime,
+    lead_minutes: int = MIN_BOOKING_LEAD_MINUTES,
+) -> bool:
+    """Check if the given hour:minute on today meets the minimum lead time."""
+    candidate = datetime(
+        now_local.year,
+        now_local.month,
+        now_local.day,
+        hour,
+        minute,
+        tzinfo=TASHKENT_TZ,
+    )
+    return (candidate - now_local) >= timedelta(minutes=lead_minutes)
+
+
 def build_hour_picker_kb(
     *,
     which: str,
     language: str | None = None,
+    day_offset: int = 0,
     highlight_hour: Optional[int] = None,
+    start_hour: Optional[int] = None,
+    start_minute: Optional[int] = None,
 ) -> InlineKeyboardMarkup:
     """
-    Step 2 / 4: hours 08–23 as plain digits in a 4-column grid.
+    Step 2 / 4: hours 08–23 in a 4-column grid.
 
-    ``which`` is ``sh`` (start hour) or ``eh`` (end hour).
+    15-Min Rule:
+    For today (day_offset == 0), if all 4 minutes of an hour fail the 15-min rule
+    (or for end hour, are not after start_time), the cell is replaced by '.'
+    and clicking returns a disabled callback.
     """
     builder = InlineKeyboardBuilder()
     buttons: list[InlineKeyboardButton] = []
+    now_local = utc_now().astimezone(TASHKENT_TZ)
+
     for hour in range(8, 24):
-        label = _mark_current(
-            f"{hour:02d}",
-            is_current=highlight_hour is not None and hour == highlight_hour,
-        )
-        buttons.append(
-            InlineKeyboardButton(
-                text=label,
-                callback_data=SlotWizardCB(act=which, val=hour).pack(),
+        is_valid = True
+
+        if day_offset == 0:
+            if which == "sh":
+                # Start hour is valid if at least one minute (:00, :15, :30, :45) is valid
+                has_any_valid_minute = any(
+                    _is_slot_time_valid_today(hour, m, now_local)
+                    for m in (0, 15, 30, 45)
+                )
+                if not has_any_valid_minute:
+                    is_valid = False
+            elif which == "eh":
+                # End hour is valid if there are minutes after start_hour:start_minute
+                if start_hour is not None:
+                    if hour < start_hour:
+                        is_valid = False
+                    elif hour == start_hour:
+                        sm = start_minute or 0
+                        if sm >= 45:
+                            is_valid = False
+
+        if is_valid:
+            label = _mark_current(
+                f"{hour:02d}",
+                is_current=highlight_hour is not None and hour == highlight_hour,
             )
-        )
+            cb = SlotWizardCB(act=which, val=hour).pack()
+        else:
+            label = "."
+            cb = SlotWizardCB(act="disabled", val=0).pack()
+
+        buttons.append(InlineKeyboardButton(text=label, callback_data=cb))
+
     for i in range(0, len(buttons), 4):
         builder.row(*buttons[i : i + 4])
     _append_nav(builder, language=language, with_back=True)
@@ -346,29 +450,81 @@ def build_minute_picker_kb(
     *,
     which: str,
     language: str | None = None,
+    day_offset: int = 0,
+    hour: int = 8,
     highlight_minute: Optional[int] = None,
+    start_hour: Optional[int] = None,
+    start_minute: Optional[int] = None,
 ) -> InlineKeyboardMarkup:
     """
     Step 3 / 5: minutes [00] [15] [30] [45].
 
-    ``which`` is ``sm`` (start minute) or ``em`` (end minute).
+    15-Min Rule:
+    For today (day_offset == 0), minutes that fail the 15-min rule (or end minutes <= start)
+    are replaced by '.' and clicking returns a disabled callback.
     """
     builder = InlineKeyboardBuilder()
-    builder.row(
-        *[
-            InlineKeyboardButton(
-                text=_mark_current(
-                    f"{minute:02d}",
-                    is_current=(
-                        highlight_minute is not None and minute == highlight_minute
-                    ),
-                ),
-                callback_data=SlotWizardCB(act=which, val=minute).pack(),
+    now_local = utc_now().astimezone(TASHKENT_TZ)
+    buttons: list[InlineKeyboardButton] = []
+
+    for minute in (0, 15, 30, 45):
+        is_valid = True
+
+        if day_offset == 0:
+            if which == "sm":
+                if not _is_slot_time_valid_today(hour, minute, now_local):
+                    is_valid = False
+            elif which == "em":
+                if start_hour is not None and hour == start_hour:
+                    sm = start_minute or 0
+                    if minute <= sm:
+                        is_valid = False
+
+        if is_valid:
+            label = _mark_current(
+                f"{minute:02d}",
+                is_current=highlight_minute is not None and minute == highlight_minute,
             )
-            for minute in (0, 15, 30, 45)
-        ]
-    )
+            cb = SlotWizardCB(act=which, val=minute).pack()
+        else:
+            label = "."
+            cb = SlotWizardCB(act="disabled", val=0).pack()
+
+        buttons.append(InlineKeyboardButton(text=label, callback_data=cb))
+
+    builder.row(*buttons)
     _append_nav(builder, language=language, with_back=True)
+    return builder.as_markup()
+
+
+def build_format_picker_kb(
+    language: str | None = None,
+    current_is_online: Optional[bool] = None,
+) -> InlineKeyboardMarkup:
+    """Step 6: format selection (Offline / Online)."""
+    lang = normalize_language(language)
+    builder = InlineKeyboardBuilder()
+
+    offline_label = _mark_current(
+        _t(lang, "format_offline"),
+        is_current=current_is_online is False,
+    )
+    online_label = _mark_current(
+        _t(lang, "format_online"),
+        is_current=current_is_online is True,
+    )
+
+    builder.row(
+        InlineKeyboardButton(
+            text=offline_label,
+            callback_data=SlotWizardCB(act="fmt", val=0).pack(),
+        ),
+        InlineKeyboardButton(
+            text=online_label,
+            callback_data=SlotWizardCB(act="fmt", val=1).pack(),
+        ),
+    )
+    _append_nav(builder, language=lang, with_back=True)
     return builder.as_markup()
 
 
@@ -387,11 +543,7 @@ def wizard_date_label(day_offset: int, language: str | None = None) -> str:
 
 
 def day_offset_from_start(start_time: str | datetime) -> int:
-    """
-    Day offset (from today, Tashkent) for an existing slot start.
-
-    Clamped to 0..6 so the date picker can highlight it.
-    """
+    """Day offset (from today, Tashkent) for an existing slot start."""
     local_date = to_tashkent(start_time).date()
     today = utc_now().astimezone(TASHKENT_TZ).date()
     return max(0, min(6, (local_date - today).days))

@@ -35,10 +35,12 @@ from bot.database.models import (
 )
 from bot.services.crypto import CryptoService
 from bot.services.s21_api import S21ApiClient, S21ApiError, S21AuthError, S21NetworkError
+from bot.services.slot_splitter import calculate_slot_splits
 
 logger = logging.getLogger(__name__)
 
 # Reminder offsets relative to start_time (minutes before).
+# Trigger 2 (T-15), Trigger 3 (T-2), Trigger 4 (T-0)
 REMINDER_OFFSETS_MINUTES: tuple[int, ...] = (15, 2, 0)
 
 
@@ -69,10 +71,33 @@ def _role_peer_line_html(role: str, peer_raw: object | None) -> str:
     return f"Твой проверяемый: {code}"
 
 
-def _booked_headline(role: str) -> str:
+def _build_booked_instant_text(
+    role: str,
+    peer_raw: object | None,
+    when: str,
+    is_online: bool | None,
+    *,
+    language: str | None = None,
+) -> str:
+    """TRIGGER 1: Instant booking notification for evaluator or evaluated."""
+    fmt_str = "🌐 Онлайн" if is_online else "🏢 Офлайн"
+    peer_code = _peer_code_html(peer_raw)
+
     if role == ROLE_EVALUATED:
-        return "🔥 <b>Тебе назначили проверяющего!</b>"
-    return "🔥 <b>К тебе записались на Пир-Ревью!</b>"
+        return (
+            "🔥 <b>Ты записался на проверку!</b>\n\n"
+            "Роль: 📖 <b>Проверяемый</b>\n"
+            f"Твой проверяющий: {peer_code}\n"
+            f"Формат: {fmt_str}\n"
+            f"Время: {html.escape(when)}"
+        )
+    return (
+        "🔥 <b>К тебе записались на проверку!</b>\n\n"
+        "Роль: 🔍 <b>Проверяющий</b>\n"
+        f"Твой проверяемый: {peer_code}\n"
+        f"Формат: {fmt_str}\n"
+        f"Время: {html.escape(when)}"
+    )
 
 
 def _resolve_role(item: CalendarSnapshotItem | TrackedEvent) -> str:
@@ -88,10 +113,10 @@ class PeerReviewScheduler:
     """
     Two responsibilities:
 
-    1. **Poller** (every N seconds) — auth → fetch calendar → diff against
-       ``events`` table → notify on create / book / cancel for peer-review slots.
+    1. **Poller** (every N seconds) — auth → fetch calendar → slot split check
+       → diff against ``events`` table → notify on create / book / cancel.
     2. **Reminders** — when a row becomes BOOKED, schedule one-shot ``date``
-       jobs at T-15 / T-2 / T-0.
+       jobs at T-15 / T-2 / T-0 (mirroring both roles).
     """
 
     def __init__(
@@ -170,6 +195,7 @@ class PeerReviewScheduler:
     async def _process_user(self, user: User) -> None:
         password: Optional[str] = None
         snapshot = None
+        token: Optional[str] = None
 
         # Auth + calendarGetEvents share one semaphore slot (max 3 in flight).
         async with self._api_semaphore:
@@ -177,7 +203,6 @@ class PeerReviewScheduler:
                 password = self._crypto.decrypt(user.encrypted_password)
                 token = await self._api.get_access_token(user.s21_login, password)
             except S21NetworkError as exc:
-                # Transient transport blip — skip quietly, do not accuse credentials.
                 logger.warning(
                     "Auth network blip for chat_id=%s: %s",
                     user.telegram_chat_id,
@@ -193,7 +218,7 @@ class PeerReviewScheduler:
                 await self._safe_send(
                     user.telegram_chat_id,
                     "⚠️ Не удалось войти в платформу Школы 21. "
-                    "Проверь логин/пароль командой /login",
+                    "Проверь логин и пароль от платформы Школы 21 командой /login",
                 )
                 return
             finally:
@@ -209,8 +234,6 @@ class PeerReviewScheduler:
                     exc,
                 )
                 return
-            finally:
-                token = None  # noqa: F841
 
         # Transient network error — skip this cycle quietly.
         if snapshot is None:
@@ -220,7 +243,45 @@ class PeerReviewScheduler:
             )
             return
 
-        await self._reconcile(user, snapshot)
+        # Slot splitting: if user opened a long slot and has an evaluated booking colliding with it
+        plan = calculate_slot_splits(snapshot)
+        if plan.slots_to_update or plan.slots_to_create or plan.slots_to_delete:
+            logger.info(
+                "Slot splitting detected for user %s: %s update(s), %s create(s), %s delete(s)",
+                user.telegram_chat_id,
+                len(plan.slots_to_update),
+                len(plan.slots_to_create),
+                len(plan.slots_to_delete),
+            )
+            if token:
+                for u in plan.slots_to_update:
+                    try:
+                        await self._api.update_slot(
+                            token,
+                            str(u["event_slot_id"]),
+                            u["new_start_utc"],
+                            u["new_end_utc"],
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to sync updated split slot on API: %s", exc)
+
+                for c in plan.slots_to_create:
+                    try:
+                        await self._api.create_slot(
+                            token,
+                            c["new_start_utc"],
+                            c["new_end_utc"],
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to sync created split slot on API: %s", exc)
+
+                for d in plan.slots_to_delete:
+                    try:
+                        await self._api.delete_slot(token, str(d["event_slot_id"]))
+                    except Exception as exc:
+                        logger.warning("Failed to delete split slot on API: %s", exc)
+
+        await self._reconcile(user, plan.normalized_items)
 
     async def _reconcile(
         self,
@@ -271,13 +332,6 @@ class PeerReviewScheduler:
             if row.id is not None:
                 await self._db.update_event_status(row.id, STATUS_CANCELED)
                 self._remove_reminder_jobs(row.id)
-            logger.info(
-                "Canceled slot user=%s db_id=%s s21_id=%s reason=platform_deleted",
-                user.telegram_chat_id,
-                row.id,
-                row.s21_event_id,
-            )
-            # Local wall-clock strings (Asia/Tashkent), never raw UTC ISO.
             start_str, end_str = _split_interval(
                 format_datetime(row.start_time, row.end_time, language=lang)
             )
@@ -323,6 +377,7 @@ class PeerReviewScheduler:
         lang = user.language or DEFAULT_LANGUAGE
         when = format_datetime(item.start_time, item.end_time, language=lang)
         role = _resolve_role(item)
+        is_online = item.data.get("is_online")
 
         # --- brand-new open slot -------------------------------------------
         if existing is None and item.type == EVENT_TYPE_SLOT and item.status == STATUS_OPEN:
@@ -337,14 +392,15 @@ class PeerReviewScheduler:
                 role,
             )
             start_str, end_str = _split_interval(when)
+            fmt_str = "🌐 Онлайн" if is_online else "🏢 Офлайн"
             await self._safe_send(
                 user.telegram_chat_id,
-                f"⏳ Создан новый слот: {start_str} - {end_str}. Ждем пира",
+                f"⏳ Создан новый слот ({fmt_str}): {start_str} - {end_str}. Ждем пира",
                 parse_mode=None,
             )
             return
 
-        # --- OPEN → BOOKED (peer signed up) --------------------------------
+        # --- TRIGGER 1: OPEN → BOOKED (peer signed up) ---------------------
         if (
             existing is not None
             and existing.status == STATUS_OPEN
@@ -369,17 +425,18 @@ class PeerReviewScheduler:
                 role,
             )
             start_str, end_str = _split_interval(when)
-            await self._safe_send(
-                user_id,
-                f"{_booked_headline(role)}\n"
-                f"Время: {html.escape(start_str)} - {html.escape(end_str)}\n"
-                f"{_role_peer_line_html(role, peer_raw)}",
-                parse_mode="HTML",
+            text = _build_booked_instant_text(
+                role,
+                peer_raw,
+                f"{start_str} - {end_str}",
+                is_online,
+                language=lang,
             )
+            await self._safe_send(user_id, text, parse_mode="HTML")
             self._schedule_reminders(saved)
             return
 
-        # --- already-booked peer review first seen -------------------------
+        # --- TRIGGER 1: already-booked peer review first seen --------------
         if (
             existing is None
             and item.type == EVENT_TYPE_PEER_REVIEW
@@ -396,13 +453,14 @@ class PeerReviewScheduler:
                 role,
             )
             start_str, end_str = _split_interval(when)
-            await self._safe_send(
-                user_id,
-                f"{_booked_headline(role)}\n"
-                f"Время: {html.escape(start_str)} - {html.escape(end_str)}\n"
-                f"{_role_peer_line_html(role, peer_raw)}",
-                parse_mode="HTML",
+            text = _build_booked_instant_text(
+                role,
+                peer_raw,
+                f"{start_str} - {end_str}",
+                is_online,
+                language=lang,
             )
+            await self._safe_send(user_id, text, parse_mode="HTML")
             self._schedule_reminders(saved)
             return
 
@@ -532,7 +590,7 @@ class PeerReviewScheduler:
 
     async def send_reminder(self, event_db_id: int, minutes_before: int) -> None:
         """
-        One-shot reminder handler.
+        One-shot reminder handler for T-15, T-2, T-0.
 
         Phantom guard: re-read DB; skip if missing / CANCELED / COMPLETED.
         """
@@ -569,35 +627,67 @@ class PeerReviewScheduler:
         *,
         language: str | None = None,
     ) -> str:
-        """Compose reminder copy depending on event type and offset."""
+        """
+        Compose reminder copy depending on event type, offset, and role.
+        Symmetrical for both evaluator (🔍) and evaluated (📖).
+        """
         lang = language or DEFAULT_LANGUAGE
         role = row.effective_role
         when = html.escape(
             format_datetime(row.start_time, row.end_time, language=lang)
         )
         peer_raw = row.data.get("peer_login")
-        peer_line = _role_peer_line_html(role, peer_raw)
+        peer_code = _peer_code_html(peer_raw)
+        is_online = bool(row.data.get("is_online"))
+        fmt_str = "🌐 Онлайн" if is_online else "🏢 Офлайн"
 
-        # Peer-review T-15: reveal peer login + format.
-        if minutes_before == 15 and row.type == EVENT_TYPE_PEER_REVIEW:
-            fmt = "онлайн" if row.data.get("is_online") else "офлайн"
+        if role == ROLE_EVALUATED:
+            role_icon = "📖"
+            role_name = "Проверяемый"
+            counterpart = f"Твой проверяющий: {peer_code}"
+        else:
+            role_icon = "🔍"
+            role_name = "Проверяющий"
+            counterpart = f"Твой проверяемый: {peer_code}"
+
+        role_line = f"Роль: {role_icon} <b>{role_name}</b>"
+
+        # TRIGGER 2: T-15 minutes
+        if minutes_before == 15:
             return (
-                "⏳ <b>Пир-ревью начнется через 15 минут!</b>\n"
-                f"Время: {when}\n"
-                f"{peer_line}\n"
-                f"Формат: {fmt}"
+                "⏳ <b>Пир-ревью начнется через 15 минут!</b>\n\n"
+                f"{role_line}\n"
+                f"{counterpart}\n"
+                f"Формат: {fmt_str}\n"
+                f"Время: {when}"
             )
 
+        # TRIGGER 3: T-2 minutes
+        if minutes_before == 2:
+            return (
+                "🔔 <b>Напоминание: Пир-Ревью через 2 минуты!</b>\n\n"
+                f"{role_line}\n"
+                f"{counterpart}\n"
+                f"Формат: {fmt_str}\n"
+                f"Время: {when}"
+            )
+
+        # TRIGGER 4: T-0 minutes (Start moment)
         if minutes_before == 0:
-            timing = "прямо сейчас"
-        elif minutes_before == 2:
-            timing = "через 2 минуты"
-        else:
-            timing = f"через {minutes_before} минут"
+            return (
+                "🚀 <b>Пир-Ревью начинается прямо сейчас!</b>\n\n"
+                f"{role_line}\n"
+                f"{counterpart}\n"
+                f"Формат: {fmt_str}\n"
+                f"Время: {when}"
+            )
+
         return (
-            f"🔔 <b>Напоминание!</b> Пир-Ревью начнется {timing}!\n"
-            f"Время: {when}\n"
-            f"{peer_line}"
+            f"🔔 <b>Напоминание: Пир-Ревью через {minutes_before} минут!</b>\n\n"
+            f"{role_line}\n"
+            f"{counterpart}\n"
+            f"Формат: {fmt_str}\n"
+            f"Время: {when}"
         )
 
     # ------------------------------------------------------------------ send

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from typing import Awaitable, Callable, Optional
 
@@ -19,6 +20,7 @@ from bot.database.models import (
     LANG_RU,
     LANG_UZ,
     ROLE_EVALUATED,
+    ROLE_EVALUATOR,
     STATUS_BOOKED,
     STATUS_CANCELED,
     STATUS_OPEN,
@@ -29,6 +31,7 @@ from bot.keyboards.reviews import (
     SlotWizardCB,
     build_date_picker_kb,
     build_empty_slots_kb,
+    build_format_picker_kb,
     build_hour_picker_kb,
     build_minute_picker_kb,
     build_slot_card_kb,
@@ -59,12 +62,13 @@ _TEXTS = {
         "your_slots": "Your peer-review slots:",
         "create_title": "➕ *Create slot*",
         "edit_title": "🔄 *Change slot time*",
-        "step_date": "Step 1/5 — choose a *date*:",
-        "step_date_new": "Step 1/5 — choose a *new date*:",
-        "step_start_hour": "Step 2/5 — *start* hour:",
-        "step_start_minute": "Step 3/5 — *start* minutes:",
-        "step_end_hour": "Step 4/5 — *end* hour:",
-        "step_end_minute": "Step 5/5 — *end* minutes:",
+        "step_date": "Step 1/6 — choose a *date*:",
+        "step_date_new": "Step 1/6 — choose a *new date*:",
+        "step_start_hour": "Step 2/6 — *start* hour:",
+        "step_start_minute": "Step 3/6 — *start* minutes:",
+        "step_end_hour": "Step 4/6 — *end* hour:",
+        "step_end_minute": "Step 5/6 — *end* minutes:",
+        "step_format": "Step 6/6 — choose *format*:",
         "date_line": "Date: *{date}*",
         "start_partial": "Start: *{hh}:??*",
         "start_full": "Start: *{hh}:{mm}*",
@@ -79,10 +83,11 @@ _TEXTS = {
         "peer_evaluatee": "Evaluatee: *{peer}* ({fmt})",
         "peer_evaluator": "Evaluator: *{peer}* ({fmt})",
         "peer_unknown": "unknown peer",
-        "role_evaluator": "Role: 👨‍🏫 *Checking*",
-        "role_evaluated": "Role: 👨‍🎓 *Being checked*",
-        "fmt_online": "online",
-        "fmt_offline": "offline",
+        "role_evaluator": "Role: 🔍 *Checking*",
+        "role_evaluated": "Role: 📖 *Being checked*",
+        "fmt_online": "Online",
+        "fmt_offline": "Offline",
+        "fmt_line": "Format: {icon} *{fmt}*",
         "goal_line": "\nProject: {goal}",
         "cancelled": "Action cancelled",
         "created_ok": "Slot created successfully!",
@@ -106,20 +111,25 @@ _TEXTS = {
         "toggle_reject": "Platform rejected the change",
         "online": "Online",
         "offline": "Offline",
+        "format_updated_ok": "Review format updated!",
         "session_expired": "Session expired, start over",
         "evaluator_only": "Only the evaluator can manage this slot",
+        "time_unavailable": "Time unavailable (15-min rule or in past)",
+        "category_evaluator": "I am checking",
+        "category_evaluated": "Being checked",
     },
     LANG_RU: {
         "no_slots": "Нет активных слотов",
         "your_slots": "Твои слоты на пир-ревью:",
         "create_title": "➕ *Создание слота*",
         "edit_title": "🔄 *Изменение времени слота*",
-        "step_date": "Шаг 1/5 — выбери *дату*:",
-        "step_date_new": "Шаг 1/5 — выбери *новую дату*:",
-        "step_start_hour": "Шаг 2/5 — час *начала*:",
-        "step_start_minute": "Шаг 3/5 — минуты *начала*:",
-        "step_end_hour": "Шаг 4/5 — час *конца*:",
-        "step_end_minute": "Шаг 5/5 — минуты *конца*:",
+        "step_date": "Шаг 1/6 — выбери *дату*:",
+        "step_date_new": "Шаг 1/6 — выбери *новую дату*:",
+        "step_start_hour": "Шаг 2/6 — час *начала*:",
+        "step_start_minute": "Шаг 3/6 — минуты *начала*:",
+        "step_end_hour": "Шаг 4/6 — час *конца*:",
+        "step_end_minute": "Шаг 5/6 — минуты *конца*:",
+        "step_format": "Шаг 6/6 — выбери *формат* проверки:",
         "date_line": "Дата: *{date}*",
         "start_partial": "Начало: *{hh}:??*",
         "start_full": "Начало: *{hh}:{mm}*",
@@ -134,10 +144,11 @@ _TEXTS = {
         "peer_evaluatee": "Проверяемый: *{peer}* ({fmt})",
         "peer_evaluator": "Проверяющий: *{peer}* ({fmt})",
         "peer_unknown": "неизвестный пир",
-        "role_evaluator": "Роль: 👨‍🏫 *Проверяю*",
-        "role_evaluated": "Роль: 👨‍🎓 *Проверяют меня*",
-        "fmt_online": "онлайн",
-        "fmt_offline": "офлайн",
+        "role_evaluator": "Роль: 🔍 *Проверяющий*",
+        "role_evaluated": "Роль: 📖 *Проверяемый*",
+        "fmt_online": "Онлайн",
+        "fmt_offline": "Офлайн",
+        "fmt_line": "Формат: {icon} *{fmt}*",
         "goal_line": "\nПроект: {goal}",
         "cancelled": "Действие отменено",
         "created_ok": "Слот успешно создан!",
@@ -161,20 +172,25 @@ _TEXTS = {
         "toggle_reject": "Платформа отклонила изменение",
         "online": "Онлайн",
         "offline": "Офлайн",
+        "format_updated_ok": "Формат проверки изменен!",
         "session_expired": "Сессия истекла, начни заново",
         "evaluator_only": "Управлять слотом может только проверяющий",
+        "time_unavailable": "Время недоступно (правило 15 минут или прошло)",
+        "category_evaluator": "Я проверяющий",
+        "category_evaluated": "Меня проверяют",
     },
     LANG_UZ: {
         "no_slots": "Faol slotlar yo‘q",
         "your_slots": "Peer-review slotlaringiz:",
         "create_title": "➕ *Slot yaratish*",
         "edit_title": "🔄 *Slot vaqtini o‘zgartirish*",
-        "step_date": "1/5-qadam — *sanani* tanlang:",
-        "step_date_new": "1/5-qadam — *yangi sanani* tanlang:",
-        "step_start_hour": "2/5-qadam — *boshlanish* soati:",
-        "step_start_minute": "3/5-qadam — *boshlanish* daqiqalari:",
-        "step_end_hour": "4/5-qadam — *tugash* soati:",
-        "step_end_minute": "5/5-qadam — *tugash* daqiqalari:",
+        "step_date": "1/6-qadam — *sanani* tanlang:",
+        "step_date_new": "1/6-qadam — *yangi sanani* tanlang:",
+        "step_start_hour": "2/6-qadam — *boshlanish* soati:",
+        "step_start_minute": "3/6-qadam — *boshlanish* daqiqalari:",
+        "step_end_hour": "4/6-qadam — *tugash* soati:",
+        "step_end_minute": "5/6-qadam — *tugash* daqiqalari:",
+        "step_format": "6/6-qadam — tekshiruv *formatini* tanlang:",
         "date_line": "Sana: *{date}*",
         "start_partial": "Boshlanish: *{hh}:??*",
         "start_full": "Boshlanish: *{hh}:{mm}*",
@@ -189,10 +205,11 @@ _TEXTS = {
         "peer_evaluatee": "Tekshiriluvchi: *{peer}* ({fmt})",
         "peer_evaluator": "Tekshiruvchi: *{peer}* ({fmt})",
         "peer_unknown": "noma’lum peer",
-        "role_evaluator": "Rol: 👨‍🏫 *Tekshiraman*",
-        "role_evaluated": "Rol: 👨‍🎓 *Meni tekshiradi*",
-        "fmt_online": "online",
-        "fmt_offline": "offline",
+        "role_evaluator": "Rol: 🔍 *Tekshiruvchi*",
+        "role_evaluated": "Rol: 📖 *Tekshiriluvchi*",
+        "fmt_online": "Online",
+        "fmt_offline": "Offline",
+        "fmt_line": "Format: {icon} *{fmt}*",
         "goal_line": "\nLoyiha: {goal}",
         "cancelled": "Amal bekor qilindi",
         "created_ok": "Slot muvaffaqiyatli yaratildi!",
@@ -216,8 +233,12 @@ _TEXTS = {
         "toggle_reject": "Platforma o‘zgarishni rad etdi",
         "online": "Online",
         "offline": "Offline",
+        "format_updated_ok": "Tekshiruv formati o‘zgartirildi!",
         "session_expired": "Sessiya tugadi, qaytadan boshlang",
         "evaluator_only": "Slotni faqat tekshiruvchi boshqara oladi",
+        "time_unavailable": "Vaqt mavjud emas (15 daqiqa qoidasi yoki o‘tgan)",
+        "category_evaluator": "Men tekshiruvchiman",
+        "category_evaluated": "Meni tekshirishadi",
     },
 }
 
@@ -273,6 +294,10 @@ def _slot_card_text(slot: TrackedEvent, language: str | None = None) -> str:
         if role == ROLE_EVALUATED
         else _tr(lang, "role_evaluator")
     )
+    is_online = bool(slot.data.get("is_online"))
+    fmt_icon = "🌐" if is_online else "🏢"
+    fmt_name = _tr(lang, "fmt_online") if is_online else _tr(lang, "fmt_offline")
+    fmt_line = _tr(lang, "fmt_line", icon=fmt_icon, fmt=fmt_name)
 
     if slot.status == STATUS_OPEN:
         status_line = _tr(lang, "status_open")
@@ -281,16 +306,11 @@ def _slot_card_text(slot: TrackedEvent, language: str | None = None) -> str:
         peer = escape_md(
             str(slot.data.get("peer_login") or _tr(lang, "peer_unknown"))
         )
-        fmt = (
-            _tr(lang, "fmt_online")
-            if slot.data.get("is_online")
-            else _tr(lang, "fmt_offline")
-        )
         status_line = _tr(lang, "status_booked")
         peer_key = (
             "peer_evaluator" if role == ROLE_EVALUATED else "peer_evaluatee"
         )
-        peer_line = _tr(lang, peer_key, peer=peer, fmt=fmt)
+        peer_line = _tr(lang, peer_key, peer=peer, fmt=fmt_name)
 
     goal = slot.data.get("goal_name")
     goal_line = (
@@ -301,6 +321,7 @@ def _slot_card_text(slot: TrackedEvent, language: str | None = None) -> str:
         f"{_tr(lang, 'card_title')}\n\n"
         f"{role_line}\n"
         f"{_tr(lang, 'time_line', when=when)}\n"
+        f"{fmt_line}\n"
         f"{status_line}\n"
         f"{peer_line}"
         f"{goal_line}"
@@ -320,6 +341,7 @@ async def show_reviews_list(
     user_id: int,
     *,
     language: str | None = None,
+    category_filter: Optional[str] = None,
     edit: bool = True,
 ) -> None:
     lang = normalize_language(language)
@@ -328,8 +350,14 @@ async def show_reviews_list(
         text = _tr(lang, "no_slots")
         markup = build_empty_slots_kb(lang)
     else:
-        text = _tr(lang, "your_slots")
-        markup = build_slots_list_kb(slots, lang)
+        evaluator_count = sum(1 for s in slots if s.effective_role == ROLE_EVALUATOR)
+        evaluated_count = sum(1 for s in slots if s.effective_role == ROLE_EVALUATED)
+        text = (
+            f"{_tr(lang, 'your_slots')}\n\n"
+            f"🔍 *{_tr(lang, 'category_evaluator')}:* {evaluator_count}\n"
+            f"📖 *{_tr(lang, 'category_evaluated')}:* {evaluated_count}"
+        )
+        markup = build_slots_list_kb(slots, lang, category_filter=category_filter)
 
     if edit:
         await message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
@@ -378,6 +406,7 @@ def get_reviews_router(
         highlight_start_minute: Optional[int] = None,
         highlight_end_hour: Optional[int] = None,
         highlight_end_minute: Optional[int] = None,
+        current_is_online: Optional[bool] = None,
     ) -> None:
         await state.set_state(SlotFSM.picking_date)
         await state.update_data(
@@ -391,6 +420,7 @@ def get_reviews_router(
             highlight_start_minute=highlight_start_minute,
             highlight_end_hour=highlight_end_hour,
             highlight_end_minute=highlight_end_minute,
+            is_online=current_is_online or False,
             day_offset=None,
             start_hour=None,
             start_minute=None,
@@ -464,7 +494,8 @@ def get_reviews_router(
         lang = normalize_language(data.get("language"))
         mode = data.get("wizard_mode") or "create"
         title_key = "create_title" if mode == "create" else "edit_title"
-        date_label = wizard_date_label(int(data.get("day_offset") or 0), lang)
+        day_offset = int(data.get("day_offset") or 0)
+        date_label = wizard_date_label(day_offset, lang)
         highlight = data.get("highlight_start_hour")
         await state.set_state(SlotFSM.picking_start_hour)
         if callback.message:
@@ -476,6 +507,7 @@ def get_reviews_router(
                 reply_markup=build_hour_picker_kb(
                     which="sh",
                     language=lang,
+                    day_offset=day_offset,
                     highlight_hour=int(highlight) if highlight is not None else None,
                 ),
                 parse_mode="Markdown",
@@ -489,7 +521,8 @@ def get_reviews_router(
         lang = normalize_language(data.get("language"))
         mode = data.get("wizard_mode") or "create"
         title_key = "create_title" if mode == "create" else "edit_title"
-        date_label = wizard_date_label(int(data.get("day_offset") or 0), lang)
+        day_offset = int(data.get("day_offset") or 0)
+        date_label = wizard_date_label(day_offset, lang)
         start_h = int(data.get("start_hour") or 0)
         highlight = data.get("highlight_start_minute")
         await state.set_state(SlotFSM.picking_start_minute)
@@ -503,6 +536,8 @@ def get_reviews_router(
                 reply_markup=build_minute_picker_kb(
                     which="sm",
                     language=lang,
+                    day_offset=day_offset,
+                    hour=start_h,
                     highlight_minute=(
                         int(highlight) if highlight is not None else None
                     ),
@@ -518,7 +553,8 @@ def get_reviews_router(
         lang = normalize_language(data.get("language"))
         mode = data.get("wizard_mode") or "create"
         title_key = "create_title" if mode == "create" else "edit_title"
-        date_label = wizard_date_label(int(data.get("day_offset") or 0), lang)
+        day_offset = int(data.get("day_offset") or 0)
+        date_label = wizard_date_label(day_offset, lang)
         start_h = int(data.get("start_hour") or 0)
         start_m = int(data.get("start_minute") or 0)
         highlight = data.get("highlight_end_hour")
@@ -533,7 +569,10 @@ def get_reviews_router(
                 reply_markup=build_hour_picker_kb(
                     which="eh",
                     language=lang,
+                    day_offset=day_offset,
                     highlight_hour=int(highlight) if highlight is not None else None,
+                    start_hour=start_h,
+                    start_minute=start_m,
                 ),
                 parse_mode="Markdown",
             )
@@ -546,7 +585,8 @@ def get_reviews_router(
         lang = normalize_language(data.get("language"))
         mode = data.get("wizard_mode") or "create"
         title_key = "create_title" if mode == "create" else "edit_title"
-        date_label = wizard_date_label(int(data.get("day_offset") or 0), lang)
+        day_offset = int(data.get("day_offset") or 0)
+        date_label = wizard_date_label(day_offset, lang)
         start_h = int(data.get("start_hour") or 0)
         start_m = int(data.get("start_minute") or 0)
         end_h = int(data.get("end_hour") or 0)
@@ -563,9 +603,43 @@ def get_reviews_router(
                 reply_markup=build_minute_picker_kb(
                     which="em",
                     language=lang,
+                    day_offset=day_offset,
+                    hour=end_h,
                     highlight_minute=(
                         int(highlight) if highlight is not None else None
                     ),
+                    start_hour=start_h,
+                    start_minute=start_m,
+                ),
+                parse_mode="Markdown",
+            )
+
+    async def _render_format_step(
+        callback: CallbackQuery,
+        state: FSMContext,
+        data: dict,
+    ) -> None:
+        lang = normalize_language(data.get("language"))
+        mode = data.get("wizard_mode") or "create"
+        title_key = "create_title" if mode == "create" else "edit_title"
+        date_label = wizard_date_label(int(data.get("day_offset") or 0), lang)
+        start_h = int(data.get("start_hour") or 0)
+        start_m = int(data.get("start_minute") or 0)
+        end_h = int(data.get("end_hour") or 0)
+        end_m = int(data.get("end_minute") or 0)
+        current_online = data.get("is_online")
+        await state.set_state(SlotFSM.picking_format)
+        if callback.message:
+            await callback.message.edit_text(
+                f"{_edit_prefix(data, lang)}"
+                f"{_tr(lang, title_key)}\n\n"
+                f"{_tr(lang, 'date_line', date=date_label)}\n"
+                f"{_tr(lang, 'start_full', hh=f'{start_h:02d}', mm=f'{start_m:02d}')}\n"
+                f"Конец: *{end_h:02d}:{end_m:02d}*\n\n"
+                f"{_tr(lang, 'step_format')}",
+                reply_markup=build_format_picker_kb(
+                    language=lang,
+                    current_is_online=current_online,
                 ),
                 parse_mode="Markdown",
             )
@@ -603,6 +677,11 @@ def get_reviews_router(
             await callback.answer()
             return
 
+        if current == SlotFSM.picking_format.state:
+            await _render_end_minute(callback, state, data)
+            await callback.answer()
+            return
+
         await callback.answer()
 
     async def _finish_wizard(
@@ -618,6 +697,7 @@ def get_reviews_router(
             start_minute = int(data["start_minute"])
             end_hour = int(data["end_hour"])
             end_minute = int(data["end_minute"])
+            is_online = bool(data.get("is_online", False))
         except (KeyError, TypeError, ValueError):
             await state.clear()
             await callback.answer(_tr(lang, "session_reset"), show_alert=True)
@@ -652,11 +732,15 @@ def get_reviews_router(
                     utc_iso(start_dt),
                     utc_iso(end_dt),
                 )
+                existing_ev = await db.get_event_by_id(int(slot_id))
+                ev_data = dict(existing_ev.data if existing_ev else {})
+                ev_data["is_online"] = is_online
                 await db.update_event_status(
                     int(slot_id),
                     STATUS_OPEN,
                     start_time=utc_iso(start_dt),
                     end_time=utc_iso(end_dt),
+                    data=ev_data,
                 )
                 ok_text = _tr(lang, "updated_ok")
             else:
@@ -706,6 +790,30 @@ def get_reviews_router(
             db,
             callback.from_user.id,
             language=user.language,
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("slot_cat:"))
+    async def cb_slot_cat(callback: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        if not callback.message or not callback.data:
+            await callback.answer()
+            return
+        cat = callback.data.split(":", 1)[1]
+        category_filter = None if cat == "all" else cat
+        try:
+            user = await require_user(db, callback.from_user.id)
+        except AuthRequiredError:
+            await callback.answer(_tr(DEFAULT_LANGUAGE, "need_auth"), show_alert=True)
+            return
+
+        await show_reviews_list(
+            callback.message,
+            db,
+            callback.from_user.id,
+            language=user.language,
+            category_filter=category_filter,
+            edit=True,
         )
         await callback.answer()
 
@@ -807,6 +915,8 @@ def get_reviews_router(
         )
         local_start = to_tashkent(slot.start_time)
         local_end = to_tashkent(slot.end_time) if slot.end_time else None
+        is_online = bool(slot.data.get("is_online"))
+
         await _start_wizard(
             callback,
             state,
@@ -821,6 +931,7 @@ def get_reviews_router(
             highlight_start_minute=local_start.minute,
             highlight_end_hour=local_end.hour if local_end else None,
             highlight_end_minute=local_end.minute if local_end else None,
+            current_is_online=is_online,
         )
         await callback.answer()
 
@@ -909,41 +1020,28 @@ def get_reviews_router(
         if (
             slot is None
             or slot.user_id != callback.from_user.id
-            or slot.status != STATUS_BOOKED
+            or not _is_review_slot(slot)
         ):
-            await callback.answer(_tr(lang, "booked_only"), show_alert=True)
-            return
-
-        booking_id = str(slot.data.get("booking_id") or "")
-        if not booking_id:
-            await callback.answer(_tr(lang, "no_booking_id"), show_alert=True)
+            await callback.answer(_tr(lang, "not_found"), show_alert=True)
             return
 
         new_online = not bool(slot.data.get("is_online"))
-        try:
-            token = await get_user_token(user, crypto=crypto, api=api)
-            await api.toggle_online(token, booking_id, new_online)
-        except AuthRequiredError:
-            await callback.answer(_tr(lang, "auth_platform"), show_alert=True)
-            return
-        except (PlatformNetworkError, S21NetworkError):
-            await callback.answer(_tr(lang, "network"), show_alert=True)
-            return
-        except NotImplementedError:
-            await callback.answer(
-                _tr(lang, "toggle_missing"),
-                show_alert=True,
-            )
-            return
-        except S21ApiError as exc:
-            logger.warning("toggle_online failed: %s", exc)
-            await callback.answer(_tr(lang, "toggle_reject"), show_alert=True)
-            return
+
+        # If booked, attempt platform mutation if supported
+        booking_id = str(slot.data.get("booking_id") or "")
+        if booking_id:
+            try:
+                token = await get_user_token(user, crypto=crypto, api=api)
+                await api.toggle_online(token, booking_id, new_online)
+            except NotImplementedError:
+                pass  # Graceful fallback: local state update
+            except Exception as exc:
+                logger.warning("toggle_online platform error: %s", exc)
 
         new_data = dict(slot.data)
         new_data["is_online"] = new_online
         if slot.id is not None:
-            await db.update_event_status(slot.id, STATUS_BOOKED, data=new_data)
+            await db.update_event_status(slot.id, slot.status, data=new_data)
             slot = await db.get_event_by_id(slot.id) or slot
 
         await callback.message.edit_text(
@@ -951,9 +1049,8 @@ def get_reviews_router(
             reply_markup=build_slot_card_kb(slot, lang),
             parse_mode="Markdown",
         )
-        await callback.answer(
-            _tr(lang, "online") if new_online else _tr(lang, "offline")
-        )
+        msg = _tr(lang, "online") if new_online else _tr(lang, "offline")
+        await callback.answer(f"{_tr(lang, 'format_updated_ok')} {msg}")
 
     # ---------------------------------------------------------- time wizard
 
@@ -970,8 +1067,12 @@ def get_reviews_router(
         data = await state.get_data()
         lang = normalize_language(data.get("language"))
         current = await state.get_state()
-        if current is None and callback_data.act not in {"cancel", "back"}:
+        if current is None and callback_data.act not in {"cancel", "back", "disabled"}:
             await callback.answer(_tr(lang, "session_expired"), show_alert=True)
+            return
+
+        if callback_data.act == "disabled":
+            await callback.answer(_tr(lang, "time_unavailable"), show_alert=False)
             return
 
         if callback_data.act == "cancel":
@@ -1012,6 +1113,14 @@ def get_reviews_router(
 
         if callback_data.act == "em":
             await state.update_data(end_minute=callback_data.val)
+            fresh = await state.get_data()
+            await _render_format_step(callback, state, fresh)
+            await callback.answer()
+            return
+
+        if callback_data.act == "fmt":
+            is_online = bool(callback_data.val == 1)
+            await state.update_data(is_online=is_online)
             fresh = await state.get_data()
             await _finish_wizard(callback, state, fresh)
             return

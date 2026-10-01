@@ -13,3 +13,4 @@ class SlotFSM(StatesGroup):
     picking_start_minute = State()
     picking_end_hour = State()
     picking_end_minute = State()
+    picking_format = State()

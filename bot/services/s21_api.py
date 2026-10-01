@@ -475,6 +475,47 @@ class S21ApiClient:
             return data["calendarGetEvents"]
         return []
 
+    @classmethod
+    def _is_non_review_event(cls, raw: dict[str, Any]) -> bool:
+        """
+        True when this event is a campus activity, workshop, exam, penalty,
+        or other non-peer-review event (e.g. "Participant...").
+        """
+        if raw.get("activity") is not None:
+            return True
+        if raw.get("exam") is not None:
+            return True
+        if raw.get("penalty") is not None:
+            return True
+
+        desc = str(raw.get("description") or "").strip().lower()
+        if "participant" in desc or "участник" in desc or "мероприятие" in desc:
+            return True
+
+        event_type = str(raw.get("eventType") or "").upper()
+        event_code = str(raw.get("eventCode") or "").upper()
+
+        non_review_markers = (
+            "ACTIVITY",
+            "EXAM",
+            "PENALTY",
+            "WORKSHOP",
+            "LECTURE",
+            "MEETING",
+            "EVENT",
+            "CONFERENCE",
+        )
+        for marker in non_review_markers:
+            if marker in event_type or marker in event_code:
+                # Unless it's explicitly a peer review slot
+                if not any(
+                    rev in event_type or rev in event_code
+                    for rev in ("PEER", "REVIEW", "SLOT", "CHECK")
+                ):
+                    return True
+
+        return False
+
     def _parse_calendar_event(
         self,
         raw: dict[str, Any],
@@ -483,7 +524,11 @@ class S21ApiClient:
         Map one GraphQL CalendarEvent into peer-review snapshot items.
 
         Only open slots and booked peer-reviews are tracked.
+        All campus activities, exams, penalties, and non-review events are ignored.
         """
+        if self._is_non_review_event(raw):
+            return []
+
         event_id = str(raw.get("id") or "").strip()
         if not event_id:
             return []
@@ -594,15 +639,18 @@ class S21ApiClient:
             return True
         return status not in TERMINAL_BOOKING_STATUSES
 
-    @staticmethod
-    def _looks_like_open_slot(raw: dict[str, Any]) -> bool:
+    @classmethod
+    def _looks_like_open_slot(cls, raw: dict[str, Any]) -> bool:
         """True when this calendar row is an empty peer-review / duty slot."""
-        slots = raw.get("eventSlots")
-        if isinstance(slots, list) and len(slots) > 0:
-            return True
+        if cls._is_non_review_event(raw):
+            return False
 
-        if "bookings" in raw:
-            return True
+        # If there are active bookings, it's handled as booked review, not open slot
+        bookings = raw.get("bookings") or []
+        if isinstance(bookings, list) and any(
+            isinstance(b, dict) and cls._is_active_booking(b) for b in bookings
+        ):
+            return False
 
         code = str(raw.get("eventCode") or "").upper()
         description = str(raw.get("description") or "").upper()
@@ -612,13 +660,29 @@ class S21ApiClient:
             "REVIEW",
             "PEER",
             "VERIFIER",
-            "BOOKING",
             "SLOT",
             "ПИР",
             "ПРОВЕРК",
             "ДЕЖУР",
         )
         haystack = f"{code} {description} {event_type}"
+
+        slots = raw.get("eventSlots")
+        if isinstance(slots, list) and len(slots) > 0:
+            for s in slots:
+                if isinstance(s, dict):
+                    st = str(s.get("type") or "").upper()
+                    if any(m in st for m in markers):
+                        return True
+            if any(marker in haystack for marker in markers):
+                return True
+            # Duty slot in School 21 without activity/exam/bookings markers
+            if not any(
+                bad in haystack
+                for bad in ("ACTIVITY", "EXAM", "PENALTY", "WORKSHOP", "PARTICIPANT")
+            ):
+                return True
+
         return any(marker in haystack for marker in markers)
 
     @staticmethod

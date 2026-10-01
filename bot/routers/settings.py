@@ -41,40 +41,46 @@ _START_WELCOME = {
         "Hi! 👋\n"
         "I am your personal Peer-Review assistant for School 21. "
         "I monitor your calendar every 30 seconds\n\n"
-        "⏰ Reminders: I will notify you 15, 2 minutes before and at the start moment\n"
+        "⏰ Reminders: Instant booking alert, plus notifications 15, 2 minutes before and at start\n"
         "🕵️‍♂️ Peer nickname: Exactly 15 minutes before start "
-        "I will reveal the nickname of your evaluatee or evaluator!\n\n"
+        "I reveal the nickname of your peer and format!\n\n"
         "To get started, sign in:\n"
         "/login\n\n"
-        "*(Your data is fully secure. Passwords are encrypted)*\n\n"
+        "⚠️ *Important:* Sign-in requires your login and **password from the School 21 platform** "
+        "(`platform.21-school.ru`), NOT your Telegram password!\n"
+        "*(Your password will be securely encrypted with AES-128 and never stored in plaintext)*\n\n"
         "Learn more about features: /help"
     ),
     LANG_RU: (
         "Привет! 👋\n"
         "Я — твой персональный ассистент по Peer-проверкам в Школе 21. "
         "Я мониторю твой календарь каждые 30 секунд\n\n"
-        "⏰ Напоминания: Я пришлю уведомления за 15, 2 и в минуту старта\n"
-        "🕵️‍♂️ Никнейм пира: Ровно за 15 минут до старта "
-        "я раскрою никнейм твоего проверяемого или проверяющего!\n\n"
+        "⏰ Напоминания: моментальное оповещение при записи, а также за 15, 2 и в минуту старта\n"
+        "🕵️‍♂️ Никнейм пира: ровно за 15 минут до старта "
+        "я раскрою никнейм твоего проверяемого или проверяющего и формат!\n\n"
         "Для начала работы необходимо авторизоваться:\n"
         "/login\n\n"
-        "*(Твои данные в полной безопасности. Пароли шифруются)*\n\n"
+        "⚠️ *Важно для входа:* Требуется именно твой логин и **пароль от платформы Школы 21** "
+        "(`platform.21-school.ru`), а НЕ пароль от Telegram!\n"
+        "*(Пароль надежно шифруется ключом AES-128 и нигде не сохраняется в открытом виде)*\n\n"
         "Узнать больше о функционале: /help"
     ),
     LANG_UZ: (
         "Salom! 👋\n"
         "Men School 21 Peer-tekshiruvlari bo‘yicha shaxsiy yordamchingizman. "
         "Kalendaringizni har 30 soniyada kuzataman\n\n"
-        "⏰ Eslatmalar: 15, 2 daqiqa oldin va boshlanish daqiqasida "
-        "xabar yuboraman\n"
-        "🕵️‍♂️ Peer nickname: Boshlanishidan roppa-rosa 15 daqiqa oldin "
-        "tekshiriluvchi yoki tekshiruvchingiz nicknameini ochaman!\n\n"
+        "⏰ Eslatmalar: yozilishda tezkor xabar, shuningdek 15, 2 daqiqa oldin va start daqiqasida\n"
+        "🕵️‍♂️ Peer nickname: boshlanishidan 15 daqiqa oldin "
+        "tekshiriluvchi yoki tekshiruvchingiz nicknameini va formatini ochaman!\n\n"
         "Ishni boshlash uchun avtorizatsiyadan o‘ting:\n"
         "/login\n\n"
-        "*(Ma’lumotlaringiz to‘liq xavfsiz. Parollar shifrlanadi)*\n\n"
+        "⚠️ *Muhim:* Kirish uchun Telegram paroli emas, aynan **School 21 platformasi paroli** "
+        "(`platform.21-school.ru`) kerak bo‘ladi!\n"
+        "*(Parol AES-128 kaliti bilan ishonchli shifrlanadi va ochiq ko‘rinishda saqlanmaydi)*\n\n"
         "Imkoniyatlar haqida batafsil: /help"
     ),
 }
+
 
 
 def start_welcome_text(language: str | None = None) -> str:
