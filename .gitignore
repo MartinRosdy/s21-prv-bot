@@ -1,0 +1,42 @@
+# Environment & Secrets (Безопасность - самое важное!)
+.env
+*.pem
+*.key
+
+# Runtime data & Database (База данных и логи)
+*.db
+*.sqlite
+*.sqlite3
+data/
+logs/
+*.log
+
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# IDE & OS (Настройки редакторов и кэш системы)
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Testing & Linting
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
