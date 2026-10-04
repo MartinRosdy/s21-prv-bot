@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from aiogram.filters.callback_data import CallbackData
@@ -30,8 +30,8 @@ class SlotWizardCB(CallbackData, prefix="sw"):
     """
     Compact wizard callbacks.
 
-    ``act``: date | sh | sm | eh | em | fmt | disabled | back | cancel
-    ``val``: day offset (0..6), hour (8..23), minute (0/15/30/45), or format (0=offline, 1=online)
+    ``act``: date | sh | sm | eh | em | disabled | back | cancel
+    ``val``: day offset (0..6), hour (0..23), minute (0/15/30/45)
     """
 
     act: str
@@ -72,8 +72,6 @@ _LABELS = {
         "tomorrow": "📅 Tomorrow",
         "make_offline": "🏢 Switch to Offline",
         "make_online": "🌐 Switch to Online",
-        "format_online": "🌐 Online",
-        "format_offline": "🏢 Offline",
         "category_evaluator": "🔍 I am checking",
         "category_evaluated": "📖 Being checked",
         "time_unavailable": "Time unavailable",
@@ -92,8 +90,6 @@ _LABELS = {
         "tomorrow": "📅 Завтра",
         "make_offline": "🏢 Переключить на Офлайн",
         "make_online": "🌐 Переключить на Онлайн",
-        "format_online": "🌐 Онлайн",
-        "format_offline": "🏢 Офлайн",
         "category_evaluator": "🔍 Я проверяющий",
         "category_evaluated": "📖 Меня проверяют",
         "time_unavailable": "Время недоступно",
@@ -112,8 +108,6 @@ _LABELS = {
         "tomorrow": "📅 Ertaga",
         "make_offline": "🏢 Offlinega o‘tkazish",
         "make_online": "🌐 Onlinega o‘tkazish",
-        "format_online": "🌐 Online",
-        "format_offline": "🏢 Offline",
         "category_evaluator": "🔍 Men tekshiruvchiman",
         "category_evaluated": "📖 Meni tekshirishadi",
         "time_unavailable": "Vaqt mavjud emas",
@@ -157,7 +151,7 @@ def build_slots_list_kb(
     1. 🔍 Evaluator (I check)
     2. 📖 Evaluated (Being checked)
 
-    No textual '(Проверяю)' suffixes. Clear navigation and filters.
+    Every category is labeled; open slots are a subset of evaluator slots.
     """
     builder = InlineKeyboardBuilder()
     lang = normalize_language(language)
@@ -202,8 +196,7 @@ def build_slots_list_kb(
         if slot.id is None:
             continue
         when = format_datetime(slot.start_time, slot.end_time, language=lang)
-        is_online = bool(slot.data.get("is_online"))
-        fmt_str = "🌐" if is_online else "🏢"
+        fmt_str = ("🌐" if slot.data.get("is_online") else "🏢") if slot.status == STATUS_BOOKED else ""
 
         if slot.effective_role == ROLE_EVALUATED:
             peer = slot.data.get("peer_login") or "..."
@@ -257,8 +250,6 @@ def build_slot_card_kb(
     is_online = bool(slot.data.get("is_online"))
     toggle_key = "make_offline" if is_online else "make_online"
 
-    # The existing platform mutation changes open evaluator slots. Do not
-    # pretend that a booked/evaluated review was changed only in local state.
     if slot.effective_role == ROLE_EVALUATOR:
         if slot.status == STATUS_OPEN:
             builder.row(
@@ -271,6 +262,7 @@ def build_slot_card_kb(
                     callback_data=f"slot_edit:{slot.id}",
                 ),
             )
+    if slot.status == STATUS_BOOKED:
         builder.row(
             InlineKeyboardButton(
                 text=_t(language, toggle_key),
@@ -395,7 +387,7 @@ def build_hour_picker_kb(
     start_minute: Optional[int] = None,
 ) -> InlineKeyboardMarkup:
     """
-    Step 2 / 4: hours 08–23 in a 4-column grid.
+    Step 2 / 4: hours 0–23 in a 4-column grid.
 
     15-Min Rule:
     For today (day_offset == 0), if all 4 minutes of an hour fail the 15-min rule
@@ -406,11 +398,11 @@ def build_hour_picker_kb(
     buttons: list[InlineKeyboardButton] = []
     now_local = utc_now().astimezone(TASHKENT_TZ)
 
-    for hour in range(8, 24):
+    for hour in range(24):
         is_valid = True
 
         if which == "sh" and day_offset == 0:
-                # Start hour is valid if at least one minute (:00, :15, :30, :45) is valid
+            # Start hour is valid if at least one quarter hour is valid.
             is_valid = any(
                 _is_slot_time_valid_today(hour, m, now_local)
                 for m in (0, 15, 30, 45)
@@ -424,7 +416,7 @@ def build_hour_picker_kb(
 
         if is_valid:
             label = _mark_current(
-                f"{hour:02d}",
+                str(hour),
                 is_current=highlight_hour is not None and hour == highlight_hour,
             )
             cb = SlotWizardCB(act=which, val=hour).pack()
@@ -495,37 +487,6 @@ def build_minute_picker_kb(
     return builder.as_markup()
 
 
-def build_format_picker_kb(
-    language: str | None = None,
-    current_is_online: Optional[bool] = None,
-) -> InlineKeyboardMarkup:
-    """Step 6: format selection (Offline / Online)."""
-    lang = normalize_language(language)
-    builder = InlineKeyboardBuilder()
-
-    offline_label = _mark_current(
-        _t(lang, "format_offline"),
-        is_current=current_is_online is False,
-    )
-    online_label = _mark_current(
-        _t(lang, "format_online"),
-        is_current=current_is_online is True,
-    )
-
-    builder.row(
-        InlineKeyboardButton(
-            text=offline_label,
-            callback_data=SlotWizardCB(act="fmt", val=0).pack(),
-        ),
-        InlineKeyboardButton(
-            text=online_label,
-            callback_data=SlotWizardCB(act="fmt", val=1).pack(),
-        ),
-    )
-    _append_nav(builder, language=lang, with_back=True)
-    return builder.as_markup()
-
-
 def wizard_date_label(day_offset: int, language: str | None = None) -> str:
     """Human-readable date label for wizard prompts."""
     lang = normalize_language(language)
@@ -554,15 +515,19 @@ def compose_slot_datetimes(
     start_minute: int,
     end_hour: int,
     end_minute: int,
+    selected_date: Optional[date] = None,
 ) -> tuple[datetime, datetime]:
     """Build timezone-aware UTC datetimes from wizard selections (Tashkent local)."""
     if day_offset not in range(0, 7):
         raise ValueError("day_offset must be between 0 and 6")
-    if start_hour not in range(8, 24) or end_hour not in range(8, 24):
-        raise ValueError("slot hours must be between 08 and 23")
+    if start_hour not in range(24) or end_hour not in range(24):
+        raise ValueError("slot hours must be between 0 and 23")
     if start_minute not in {0, 15, 30, 45} or end_minute not in {0, 15, 30, 45}:
         raise ValueError("slot minutes must use the 15-minute grid")
-    base = (utc_now().astimezone(TASHKENT_TZ) + timedelta(days=day_offset)).date()
+    today = utc_now().astimezone(TASHKENT_TZ).date()
+    base = selected_date or today + timedelta(days=day_offset)
+    if not today <= base <= today + timedelta(days=6):
+        raise ValueError("selected date is outside the available window")
     local_start = datetime(
         base.year,
         base.month,

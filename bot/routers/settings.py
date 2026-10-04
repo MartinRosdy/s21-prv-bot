@@ -45,9 +45,12 @@ _START_WELCOME = {
     ),
     LANG_RU: (
         "Привет! 👋\n"
-        "Я слежу за Peer-проверками в Школе 21 и напоминаю о записях.\n\n"
-        "Авторизуйся через /login. Пароль от платформы безопасно шифруется.\n"
-        "Подробнее: /help"
+        "Я слежу за Peer-проверками в Школе 21 и напоминаю о записях\n\n"
+        "Для начала работы необходимо авторизоваться:\n"
+        "<b><u>/login</u></b>\n\n"
+        "<i><b>⚠️ Требуется именно логин и пароль от платформы School 21</b></i>\n"
+        "<i>🔒 Пароль надежно шифруется ключом AES-128 и нигде не сохраняется в открытом виде</i>\n\n"
+        "Узнать больше о функционале: /help"
     ),
     LANG_UZ: (
         "Salom! 👋\n"
@@ -224,7 +227,6 @@ def get_settings_router(db: Database, bot: Optional[Bot] = None) -> Router:
             return
 
         user = await db.get_user(callback.from_user.id)
-        confirm = _LANG_CONFIRM[language]
         active_bot = bot or callback.bot
 
         # Always persist language in DB (creates soft row for brand-new guests).
@@ -246,7 +248,7 @@ def get_settings_router(db: Database, bot: Optional[Bot] = None) -> Router:
                 pass
             await callback.message.answer(
                 start_welcome_text(language),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
             await callback.answer()
             return
@@ -254,9 +256,9 @@ def get_settings_router(db: Database, bot: Optional[Bot] = None) -> Router:
         # Authenticated /lang from settings: confirm + main menu.
         await state.clear()
         await callback.message.edit_text(
-            f"{confirm}\n\n{main_menu_text(language)}",
+            main_menu_text(language, user.s21_login if user else None),
             reply_markup=build_main_menu_kb(language),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         await callback.answer()
 

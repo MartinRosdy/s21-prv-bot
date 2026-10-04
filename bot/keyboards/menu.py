@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -11,12 +13,18 @@ from bot.database.models import DEFAULT_LANGUAGE, LANG_EN, LANG_RU, LANG_UZ
 _MENU_BUTTONS = {
     LANG_EN: {
         "reviews": "📋 My slots",
+        "create": "➕ Create slot",
+        "language": "🌐 Language",
     },
     LANG_RU: {
         "reviews": "📋 Мои слоты",
+        "create": "➕ Создать слот",
+        "language": "🌐 Язык",
     },
     LANG_UZ: {
         "reviews": "📋 Mening slotlarim",
+        "create": "➕ Slot yaratish",
+        "language": "🌐 Til",
     },
 }
 
@@ -24,37 +32,46 @@ _REVIEWS_DESC = {
     LANG_EN: (
         "Your peer-review slots list. Create a slot via step-by-step "
         "date/time picker, reschedule or delete a slot, and for a booked "
-        "one — switch to online"
+        "one — open the platform to change its format"
     ),
     LANG_RU: (
         "Список твоих слотов на пир-ревью. Можно создать слот через "
         "пошаговый выбор даты и времени, изменить время или удалить слот, "
-        "а для занятого — переключить на онлайн"
+        "а для занятого — изменить формат через платформу Школы 21"
     ),
     LANG_UZ: (
         "Peer-review slotlaringiz ro‘yxati. Slotni sana/vaqt tanlash "
         "orqali yarating, vaqtini o‘zgartiring yoki o‘chiring, band "
-        "bo‘lsa — onlaynga o‘tkazing"
+        "bo‘lsa — formatini platformada o‘zgartiring"
     ),
 }
 
 _MAIN_MENU_TEXT = {
     LANG_EN: (
-        "🏠 *Main menu*\n\n"
-        "Choose a section:\n\n"
-        f"📋 *My slots* — {_REVIEWS_DESC[LANG_EN]}\n\n"
+        "✅ Language set: English\n\n"
+        "Current account: {login}\n\n"
+        "🏠 Main menu\n\n"
+        "📋 My slots — Your peer-review slots\n"
+        "Create a slot by choosing a date and time, change or delete an open slot\n"
+        "For a booked slot, use the platform to change its format\n\n"
         "ℹ️ Use /help to see all commands"
     ),
     LANG_RU: (
-        "🏠 *Главное меню*\n\n"
-        "Выбери раздел:\n\n"
-        f"📋 *Мои слоты* — {_REVIEWS_DESC[LANG_RU]}\n\n"
+        "✅ Язык установлен: Русский\n\n"
+        "Текущая авторизация: {login}\n\n"
+        "🏠 Главное меню\n\n"
+        "📋 Мои слоты — Список твоих слотов на пир-ревью\n"
+        "Можно создать слот через пошаговый выбор даты и времени, изменить время или удалить слот\n"
+        "А для занятого — переключить на онлайн формат через платформу Школы 21\n\n"
         "ℹ️ Используй /help для просмотра всех команд"
     ),
     LANG_UZ: (
-        "🏠 *Asosiy menyu*\n\n"
-        "Bo‘limni tanlang:\n\n"
-        f"📋 *Mening slotlarim* — {_REVIEWS_DESC[LANG_UZ]}\n\n"
+        "✅ Til tanlandi: O'zbekcha\n\n"
+        "Joriy akkaunt: {login}\n\n"
+        "🏠 Asosiy menyu\n\n"
+        "📋 Mening slotlarim — Peer-review slotlaringiz ro‘yxati\n"
+        "Sana va vaqtni tanlab slot yaratish, o‘zgartirish yoki o‘chirish mumkin\n"
+        "Band slot formatini School 21 platformasida o‘zgartiring\n\n"
         "ℹ️ Barcha buyruqlarni ko‘rish uchun /help dan foydalaning"
     ),
 }
@@ -76,9 +93,11 @@ def normalize_language(language: str | None) -> str:
     return DEFAULT_LANGUAGE
 
 
-def main_menu_text(language: str | None = None) -> str:
+def main_menu_text(language: str | None = None, login: str | None = None) -> str:
     """Localized main-menu caption."""
-    return _MAIN_MENU_TEXT[normalize_language(language)]
+    return _MAIN_MENU_TEXT[normalize_language(language)].format(
+        login=html.escape(login or "—")
+    )
 
 
 def reviews_desc(language: str | None = None) -> str:
@@ -94,6 +113,18 @@ def build_main_menu_kb(language: str | None = None) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text=labels["reviews"],
             callback_data="menu_reviews",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=labels["create"],
+            callback_data="slot_create",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=labels["language"],
+            callback_data="menu_settings",
         )
     )
     return builder.as_markup()

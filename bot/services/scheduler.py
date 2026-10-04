@@ -146,8 +146,8 @@ def _format_toggle_markup(
     event: TrackedEvent,
     language: str | None,
 ) -> InlineKeyboardMarkup | None:
-    """Format switch for evaluator notifications, backed by a DB event id."""
-    if event.id is None or event.effective_role != ROLE_EVALUATOR:
+    """Booking format action for the T-15 reminder."""
+    if event.id is None or event.status != STATUS_BOOKED:
         return None
     is_online = bool(event.data.get("is_online"))
     lang = language if language in {"en", "ru", "uz"} else DEFAULT_LANGUAGE
@@ -335,7 +335,6 @@ class PeerReviewScheduler:
                             str(u["event_slot_id"]),
                             u["new_start_utc"],
                             u["new_end_utc"],
-                            bool(u["original_slot"].data.get("is_online", False)),
                         )
                     except Exception as exc:
                         mutation_failed = True
@@ -347,7 +346,6 @@ class PeerReviewScheduler:
                             token,
                             c["new_start_utc"],
                             c["new_end_utc"],
-                            bool(c["parent_slot"].data.get("is_online", False)),
                         )
                     except Exception as exc:
                         mutation_failed = True
@@ -524,7 +522,6 @@ class PeerReviewScheduler:
             user_id,
             text,
             parse_mode="HTML",
-            reply_markup=_format_toggle_markup(saved, language),
         )
         return True
 
@@ -579,10 +576,9 @@ class PeerReviewScheduler:
                 role,
             )
             start_str, end_str = _split_interval(when)
-            fmt_str = "🌐 Онлайн" if is_online else "🏢 Офлайн"
             await self._safe_send(
                 user.telegram_chat_id,
-                f"⏳ Создан новый слот ({fmt_str}): {start_str} - {end_str}. Ждем пира",
+                f"⏳ Создан новый слот: {start_str} - {end_str}. Ждем пира",
                 parse_mode=None,
             )
             return
@@ -809,7 +805,16 @@ class PeerReviewScheduler:
         user = await self._db.get_user(row.user_id)
         lang = (user.language if user else None) or DEFAULT_LANGUAGE
         text = self._build_reminder_text(row, minutes_before, language=lang)
-        await self._safe_send(row.user_id, text, parse_mode="HTML")
+        await self._safe_send(
+            row.user_id,
+            text,
+            parse_mode="HTML",
+            reply_markup=(
+                _format_toggle_markup(row, lang)
+                if minutes_before == 15
+                else None
+            ),
+        )
         logger.info(
             "Reminder sent user=%s db_id=%s T-%s",
             row.user_id,

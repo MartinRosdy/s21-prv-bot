@@ -24,22 +24,23 @@ async def send_main_menu(
     message: Message,
     *,
     language: str | None = None,
+    login: str | None = None,
     edit: bool = False,
 ) -> None:
     """Render the main menu as a new message or an edited one."""
-    text = main_menu_text(language)
+    text = main_menu_text(language, login)
     markup = build_main_menu_kb(language)
     if edit:
         await message.edit_text(
             text,
             reply_markup=markup,
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
     else:
         await message.answer(
             text,
             reply_markup=markup,
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
 
@@ -62,9 +63,9 @@ def get_menu_router(db: Database) -> Router:
             hint = post_lang_auth_hint(lang)
             await callback.answer(_NEED_AUTH[lang], show_alert=True)
             try:
-                await callback.message.edit_text(hint, parse_mode="Markdown")
+                await callback.message.edit_text(hint, parse_mode="HTML")
             except Exception:
-                await callback.message.answer(hint, parse_mode="Markdown")
+                await callback.message.answer(hint, parse_mode="HTML")
             return
 
         try:
@@ -75,6 +76,7 @@ def get_menu_router(db: Database) -> Router:
         await send_main_menu(
             callback.message,
             language=user.language,
+            login=user.s21_login,
             edit=False,
         )
         await callback.answer()

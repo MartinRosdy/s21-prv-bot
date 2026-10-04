@@ -24,9 +24,14 @@ from bot.routers.menu import send_main_menu
 
 
 FIRST_START_PROMPT = (
-    "🇷🇺 Привет! Выбери язык интерфейса\n"
-    "🇬🇧 Hi! Choose your language\n"
-    "🇺🇿 Salom! Tilni tanlang"
+    "Привет! 👋\n"
+    "Я слежу за Peer-проверками в Школе 21 и напоминаю о записях\n\n"
+    "Для начала работы необходимо авторизоваться:\n"
+    "<b><u>/login</u></b>\n\n"
+    "<i><b>⚠️ Требуется именно логин и пароль от платформы School 21</b></i>\n"
+    "<i>🔒 Пароль надежно шифруется ключом AES-128 и нигде не сохраняется в открытом виде</i>\n\n"
+    "Узнать больше о функционале: /help\n\n"
+    "Выберите язык / Choose language / Tilni tanlang"
 )
 
 _SUPPORT_BLOCK = {
@@ -62,7 +67,7 @@ _HELP_TEXT = {
         "🏢 *Review Formats:*\n"
         "• 🏢 *Offline:* on-campus review at the workstation.\n"
         "• 🌐 *Online:* remote review with video call link.\n"
-        "Format is specified when creating a slot and can be toggled in the slot card.\n\n"
+        "Open slots have no format; change booked reviews on the School 21 platform.\n\n"
         "⚡️ *Automatic Slot Splitting:*\n"
         "If you have an open duty slot (e.g. 19:00 - 22:00) and sign up for a review at 19:30, "
         "the bot automatically splits your schedule:\n"
@@ -98,7 +103,7 @@ _HELP_TEXT = {
         "🏢 *Форматы проверок:*\n"
         "• 🏢 *Офлайн:* очная проверка в кампусе за рабочей станцией.\n"
         "• 🌐 *Онлайн:* дистанционная проверка со ссылкой на видеоконференцию.\n"
-        "Формат указывается при создании слота и может быть переключен в карточке слота.\n\n"
+        "У пустого слота нет формата; формат занятого ревью меняется на платформе Школы 21.\n\n"
         "⚡️ *Умное разделение слотов:*\n"
         "Если у тебя открыт длинный слот (например, 19:00 - 22:00) и ты сам записываешься на проверку в 19:30, "
         "система автоматически разделит твой график:\n"
@@ -134,7 +139,7 @@ _HELP_TEXT = {
         "🏢 *Tekshiruv formatlari:*\n"
         "• 🏢 *Offline:* kampusda bevosita ish stantsiyasida tekshiruv.\n"
         "• 🌐 *Online:* videoaloqa havolasi orqali masofaviy tekshiruv.\n"
-        "Format slot yaratishda tanlanadi va slot kartasida o‘zgartirilishi mumkin.\n\n"
+        "Bo‘sh slotda format yo‘q; band review formatini School 21 platformasida o‘zgartiring.\n\n"
         "⚡️ *Slotlarni avtomatik bo‘lish:*\n"
         "Agar sizda uzun slot ochilgan bo‘lsa (masalan, 19:00 - 22:00) va 19:30 ga tekshiruvga yozilsangiz, "
         "tizim jadvalingizni avtomatik ravishda ajratadi:\n"
@@ -158,6 +163,54 @@ _HELP_TEXT = {
     ),
 }
 
+_HELP_HTML = {
+    LANG_RU: (
+        "📖 <b>Справка — S21 Peer-Review Notifier</b>\n\n"
+        "🤖 <b>О боте:</b>\n"
+        "Бот непрерывно опрашивает календарь платформы Школы 21 каждые 30 секунд, "
+        "отслеживает слоты, присылает точечные уведомления и помогает управлять расписанием проверок\n\n"
+        "🧭 <b>Значения эмодзи и роли:</b>\n"
+        "• 🔍 — Я проверяющий (Evaluator): твои свободные слоты дежурств и проверки, "
+        "где ты оцениваешь чужой проект\n"
+        "• 📖 — Меня проверяют (Evaluated): записи на ревью, где другой пир проверяет твой проект\n\n"
+        "⏳ <b>Правило 15 минут (15-Min Rule):</b>\n"
+        "• Записаться на проверку или создать слот можно минимум за 15 минут до ее начала\n\n"
+        "🔔 <b>4 этапа уведомлений:</b>\n"
+        "1. 🔥 Моментально: при любой новой записи\n"
+        "2. ⏳ За 15 минут: напоминание с никнеймом пира, ролью и форматом "
+        "(кнопка смены формата покажет, что действие пока доступно через платформу)\n"
+        "3. 🔔 За 2 минуты: короткое напоминание о готовности\n"
+        "4. 🚀 0 минут (Старт): сигнал о начале проверки прямо сейчас\n\n"
+        "⌨️ <b>Команды:</b>\n"
+        "• /start — Главное меню и статус\n"
+        "• /help — Эта подробная справка\n"
+        "• /lang — Выбор языка (Русский / English / O'zbekcha)\n"
+        "• /login — Авторизация (логин и пароль от платформы Школы 21)\n"
+        "• /logout — Выход из аккаунта и удаление данных\n"
+        "• /cancel — Отмена текущего действия\n\n"
+        "👨‍💻 <b>Поддержка и обратная связь:</b>\n"
+        "Если вы нашли баг или хотите предложить идею — пишите создателю: @A_Martin_Rosdy"
+    ),
+    LANG_EN: (
+        "📖 <b>Help — S21 Peer-Review Notifier</b>\n\n"
+        "The bot tracks your School 21 peer reviews and sends booking and start reminders.\n"
+        "Create or change a slot at least 15 minutes before it starts.\n"
+        "🔍 Checking — you evaluate a peer; 📖 Being checked — a peer evaluates you.\n"
+        "A booked review has a format button at T-15; changing format currently requires the platform.\n\n"
+        "Commands: /start, /help, /lang, /login, /logout, /cancel\n"
+        "Support: @A_Martin_Rosdy"
+    ),
+    LANG_UZ: (
+        "📖 <b>Yordam — S21 Peer-Review Notifier</b>\n\n"
+        "Bot School 21 peer-review slotlarini kuzatadi va eslatmalar yuboradi.\n"
+        "Slot boshlanishidan kamida 15 daqiqa oldin yaratiladi yoki o‘zgartiriladi.\n"
+        "🔍 Tekshiruvchi — siz tekshirasiz; 📖 Tekshiriluvchi — sizni tekshirishadi.\n"
+        "Band slot formatini hozircha faqat platformada o‘zgartirish mumkin.\n\n"
+        "Buyruqlar: /start, /help, /lang, /login, /logout, /cancel\n"
+        "Yordam: @A_Martin_Rosdy"
+    ),
+}
+
 
 _CANCEL_DONE = {
     LANG_EN: "Action cancelled. Back: /start",
@@ -174,7 +227,7 @@ _CANCEL_NOTHING = {
 
 def help_text(language: str | None = None) -> str:
     """Localized /help body."""
-    return _HELP_TEXT[normalize_language(language)]
+    return _HELP_HTML[normalize_language(language)]
 
 
 def get_start_router(db: Database) -> Router:
@@ -193,13 +246,16 @@ def get_start_router(db: Database) -> Router:
         user = await db.get_user(message.chat.id)
 
         if user and user.is_linked:
-            await send_main_menu(message, language=user.language)
+            await send_main_menu(
+                message, language=user.language, login=user.s21_login
+            )
             return
 
         await state.update_data(from_start=True)
         await message.answer(
             FIRST_START_PROMPT,
             reply_markup=build_lang_kb(with_back=False),
+            parse_mode="HTML",
         )
 
     @router.message(Command("help"))
@@ -228,7 +284,7 @@ def get_start_router(db: Database) -> Router:
         await message.answer(
             help_text(lang),
             reply_markup=markup,
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
     @router.message(Command("cancel"))

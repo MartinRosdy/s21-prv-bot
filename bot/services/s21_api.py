@@ -50,7 +50,7 @@ fragment CalendarEvent on CalendarEvent {
   description
   eventType
   eventCode
-  eventSlots { id type start end isOnline event { eventUserRole __typename } school { shortName __typename } __typename }
+  eventSlots { id type start end event { eventUserRole __typename } school { shortName __typename } __typename }
   bookings { ...CalendarReviewBooking __typename }
   exam { ...CalendarEventExam __typename }
   studentCodeReview { studentGoalId __typename }
@@ -326,11 +326,11 @@ class S21ApiClient:
             "User-Agent": self._user_agent,
         }
         url = self._graphql_operation_url(operation_name)
-        # Raw payload dump — critical for diagnosing delete/update rejections.
+        # Log operation and variables only; the full query is noisy in production.
         logger.info(
-            "GraphQL mutation POST url=%s payload=%s",
+            "GraphQL mutation POST url=%s variables=%s",
             url,
-            json.dumps(payload, ensure_ascii=False, default=str),
+            json.dumps(variables, ensure_ascii=False, default=str),
         )
 
         try:
@@ -370,14 +370,13 @@ class S21ApiClient:
         token: str,
         start_time_utc: str,
         end_time_utc: str,
-        is_online: bool = False,
     ) -> Any:
         """Create an open peer-review duty slot on the platform."""
         # Avoid f-strings here: GraphQL braces `{}` collide with f-string syntax.
         query_str = (
-            """mutation calendarAddEvent($start: DateTime!, $end: DateTime!, $isOnline: Boolean!) {
+            """mutation calendarAddEvent($start: DateTime!, $end: DateTime!) {
   student {
-    addEventToTimetable(start: $start, end: $end, isOnline: $isOnline) {
+    addEventToTimetable(start: $start, end: $end) {
       ...CalendarEvent
       __typename
     }
@@ -387,16 +386,17 @@ class S21ApiClient:
 """
             + GRAPHQL_FRAGMENTS
         )
-        return await self._post_mutation(
+        data = await self._post_mutation(
             token,
             operation_name="calendarAddEvent",
-            variables={
-                "start": start_time_utc,
-                "end": end_time_utc,
-                "isOnline": bool(is_online),
-            },
+            variables={"start": start_time_utc, "end": end_time_utc},
             query=query_str,
         )
+        if not isinstance(data, dict) or not isinstance(data.get("student"), dict):
+            raise S21ApiError("calendarAddEvent returned no student result")
+        if not data["student"].get("addEventToTimetable"):
+            raise S21ApiError("calendarAddEvent returned no created event")
+        return data
 
     @staticmethod
     def _as_slot_id_int(slot_id: str | int) -> int:
@@ -416,14 +416,13 @@ class S21ApiClient:
         slot_id: str,
         new_start_utc: str,
         new_end_utc: str,
-        is_online: bool = False,
     ) -> Any:
         """Reschedule an existing open slot."""
         # Concatenate fragments with `+` — never f-strings with GraphQL `{}`.
         query_str = (
-            """mutation calendarChangeEventSlot($id: ID!, $start: DateTime!, $end: DateTime!, $isOnline: Boolean!) {
+            """mutation calendarChangeEventSlot($id: ID!, $start: DateTime!, $end: DateTime!) {
   student {
-    changeEventSlot(eventSlotId: $id, start: $start, end: $end, isOnline: $isOnline) {
+    changeEventSlot(eventSlotId: $id, start: $start, end: $end) {
       ...CalendarEvent
       __typename
     }
@@ -437,14 +436,18 @@ class S21ApiClient:
             "id": self._as_slot_id_int(slot_id),
             "start": new_start_utc,
             "end": new_end_utc,
-            "isOnline": bool(is_online),
         }
-        return await self._post_mutation(
+        data = await self._post_mutation(
             token,
             operation_name="calendarChangeEventSlot",
             variables=payload_vars,
             query=query_str,
         )
+        if not isinstance(data, dict) or not isinstance(data.get("student"), dict):
+            raise S21ApiError("calendarChangeEventSlot returned no student result")
+        if not data["student"].get("changeEventSlot"):
+            raise S21ApiError("calendarChangeEventSlot returned no changed event")
+        return data
 
     async def delete_slot(self, token: str, slot_id: str) -> Any:
         """Delete an open slot by platform eventSlotId."""
@@ -460,6 +463,19 @@ class S21ApiClient:
             operation_name="calendarDeleteEventSlot",
             variables={"eventSlotId": self._as_slot_id_int(slot_id)},
             query=query_str,
+        )
+
+    async def toggle_online(
+        self, token: str, booking_id: str, is_online: bool
+    ) -> Any:
+        """TODO: wire the confirmed booking-format mutation when available."""
+        logger.info(
+            "Booking format change unavailable: booking_id=%s is_online=%s",
+            booking_id,
+            is_online,
+        )
+        raise NotImplementedError(
+            "The archive does not contain a booking format mutation"
         )
 
     # ------------------------------------------------------------------ parse
@@ -576,7 +592,6 @@ class S21ApiClient:
                             "event_slot_id": event_slot_id,
                             "role": role,
                             "peer_login": None,
-                            "is_online": self._extract_open_slot_format(raw),
                         },
                     )
                 )
@@ -719,16 +734,6 @@ class S21ApiClient:
             if isinstance(slot, dict) and slot.get("id") is not None:
                 return str(slot["id"])
         return None
-
-    @staticmethod
-    def _extract_open_slot_format(raw: dict[str, Any]) -> bool:
-        """Read the format returned for an open event slot."""
-        slots = raw.get("eventSlots") or []
-        if isinstance(slots, list):
-            for slot in slots:
-                if isinstance(slot, dict) and "isOnline" in slot:
-                    return bool(slot["isOnline"])
-        return bool(raw.get("isOnline", False))
 
     @staticmethod
     def _event_user_role(container: Any) -> str:

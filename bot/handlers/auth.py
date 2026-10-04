@@ -12,7 +12,7 @@ from aiogram.types import Message
 from bot.database.db import Database
 from bot.database.models import DEFAULT_LANGUAGE, LANG_EN, LANG_RU, LANG_UZ, SUPPORTED_LANGUAGES
 from bot.keyboards.menu import build_main_menu_kb, main_menu_text, normalize_language
-from bot.routers.settings import sync_user_bot_commands
+from bot.routers.settings import start_welcome_text, sync_user_bot_commands
 from bot.services.crypto import CryptoService
 from bot.services.s21_api import S21ApiClient, S21AuthError, S21NetworkError
 from bot.states.auth import AuthStates
@@ -35,9 +35,9 @@ _ALREADY_AUTH = {
 }
 
 _ASK_LOGIN = {
-    LANG_EN: "Enter your School 21 login (e.g. `lomasadr`):",
-    LANG_RU: "Введите ваш логин от Школы 21 (например, `lomasadr`):",
-    LANG_UZ: "School 21 loginingizni kiriting (masalan, `lomasadr`):",
+    LANG_EN: "Enter your School 21 login (e.g. lomasadr):",
+    LANG_RU: "Введите ваш логин от Школы 21 (например, lomasadr):",
+    LANG_UZ: "School 21 loginingizni kiriting (masalan, lomasadr):",
 }
 
 _ASK_PASSWORD = {
@@ -170,9 +170,9 @@ def get_auth_router(
         if existing is not None and existing.is_linked:
             await message.answer(
                 f"{_ALREADY_AUTH[normalize_language(lang)]}\n\n"
-                f"{main_menu_text(lang)}",
+                f"{main_menu_text(lang, existing.s21_login)}",
                 reply_markup=build_main_menu_kb(lang),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
             return
 
@@ -187,8 +187,8 @@ def get_auth_router(
             auth_login=None,
         )
         await message.answer(
-            _ASK_LOGIN[normalize_language(lang)],
-            parse_mode="Markdown",
+            f"{start_welcome_text(lang)}\n\n{_ASK_LOGIN[normalize_language(lang)]}",
+            parse_mode="HTML",
         )
 
     @router.message(AuthStates.waiting_for_login, F.text, ~F.text.startswith("/"))
@@ -272,9 +272,9 @@ def get_auth_router(
             logger.debug("sync_user_bot_commands after login failed", exc_info=True)
 
         await status_msg.edit_text(
-            f"{_LOGIN_OK[lang]}\n\n{main_menu_text(lang)}",
+            main_menu_text(lang, saved.s21_login if saved else login),
             reply_markup=build_main_menu_kb(lang),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         logger.info("User linked: chat_id=%s login=%s", chat_id, login)
 

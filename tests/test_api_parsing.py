@@ -83,9 +83,7 @@ class TestApiParsing(unittest.IsolatedAsyncioTestCase):
             "end": "2026-10-02T18:00:00.000Z",
             "eventType": "SLOT",
             "eventCode": "REVIEW_SLOT",
-            "eventSlots": [
-                {"id": 1010, "type": "SLOT", "isOnline": True}
-            ],
+            "eventSlots": [{"id": 1010, "type": "SLOT"}],
             "bookings": [],
         }
         self.assertTrue(S21ApiClient._looks_like_open_slot(valid_slot))
@@ -95,25 +93,24 @@ class TestApiParsing(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0].type, EVENT_TYPE_SLOT)
         self.assertEqual(items[0].status, STATUS_OPEN)
         self.assertEqual(items[0].data["event_slot_id"], "1010")
-        self.assertTrue(items[0].data["is_online"])
+        self.assertNotIn("is_online", items[0].data)
 
-    async def test_create_slot_sends_selected_format(self):
-        post = AsyncMock(return_value={})
+    async def test_create_slot_uses_supported_payload(self):
+        post = AsyncMock(return_value={"student": {"addEventToTimetable": {"id": "1"}}})
         self.api._post_mutation = post
 
         await self.api.create_slot(
             "token",
             "2026-10-02T15:00:00.000Z",
             "2026-10-02T16:00:00.000Z",
-            True,
         )
 
         kwargs = post.await_args.kwargs
-        self.assertTrue(kwargs["variables"]["isOnline"])
-        self.assertIn("isOnline: $isOnline", kwargs["query"])
+        self.assertEqual(set(kwargs["variables"]), {"start", "end"})
+        self.assertNotIn("isOnline", kwargs["query"])
 
-    async def test_update_slot_sends_selected_format(self):
-        post = AsyncMock(return_value={})
+    async def test_update_slot_uses_supported_payload(self):
+        post = AsyncMock(return_value={"student": {"changeEventSlot": {"id": "1"}}})
         self.api._post_mutation = post
 
         await self.api.update_slot(
@@ -121,13 +118,19 @@ class TestApiParsing(unittest.IsolatedAsyncioTestCase):
             "1010",
             "2026-10-02T15:00:00.000Z",
             "2026-10-02T16:00:00.000Z",
-            True,
         )
 
         kwargs = post.await_args.kwargs
         self.assertEqual(kwargs["variables"]["id"], 1010)
-        self.assertTrue(kwargs["variables"]["isOnline"])
-        self.assertIn("isOnline: $isOnline", kwargs["query"])
+        self.assertEqual(set(kwargs["variables"]), {"id", "start", "end"})
+        self.assertNotIn("isOnline", kwargs["query"])
+
+    async def test_create_slot_rejects_empty_success_response(self):
+        from bot.services.s21_api import S21ApiError
+
+        self.api._post_mutation = AsyncMock(return_value={"student": {"addEventToTimetable": None}})
+        with self.assertRaises(S21ApiError):
+            await self.api.create_slot("token", "start", "end")
 
     def test_parse_valid_booked_peer_review(self):
         booked_event = {

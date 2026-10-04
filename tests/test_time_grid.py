@@ -1,4 +1,4 @@
-"""Tests for 15-minute rule, time grid dot replacement, and format picker."""
+"""Tests for the five-step time grid and 15-minute rule."""
 
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -8,7 +8,6 @@ from bot.core.utils import TASHKENT_TZ
 from bot.keyboards.reviews import (
     MIN_BOOKING_LEAD_MINUTES,
     _is_slot_time_valid_today,
-    build_format_picker_kb,
     build_hour_picker_kb,
     build_minute_picker_kb,
     compose_slot_datetimes,
@@ -79,17 +78,12 @@ class TestTimeGrid(unittest.TestCase):
             self.assertEqual(row[3].text, "45")
             self.assertEqual(row[3].callback_data, "sw:sm:45")
 
-    def test_format_picker_markup(self):
-        kb = build_format_picker_kb(language="ru", current_is_online=True)
-        # First row has Offline and Online
-        row = kb.inline_keyboard[0]
-        self.assertEqual(len(row), 2)
-        offline_btn, online_btn = row[0], row[1]
-        self.assertIn("Офлайн", offline_btn.text)
-        self.assertEqual(offline_btn.callback_data, "sw:fmt:0")
-        self.assertIn("Онлайн", online_btn.text)
-        self.assertIn("✅", online_btn.text)  # Highlighted as current
-        self.assertEqual(online_btn.callback_data, "sw:fmt:1")
+    def test_hour_picker_has_24_hours_without_leading_zero(self):
+        kb = build_hour_picker_kb(which="sh", day_offset=1)
+        buttons = [button for row in kb.inline_keyboard for button in row]
+        hours = buttons[:24]
+        self.assertEqual([button.text for button in hours], [str(h) for h in range(24)])
+        self.assertEqual(hours[8].callback_data, "sw:sh:8")
 
     def test_future_day_end_before_start_is_disabled(self):
         kb = build_hour_picker_kb(
@@ -105,8 +99,8 @@ class TestTimeGrid(unittest.TestCase):
             if button.callback_data and button.callback_data.startswith("sw:")
         ]
         self.assertEqual(hour_buttons[0].text, ".")
-        self.assertEqual(hour_buttons[10].text, "18")  # 18:45 is still valid
-        self.assertEqual(hour_buttons[11].text, "19")
+        self.assertEqual(hour_buttons[18].text, "18")  # 18:45 is still valid
+        self.assertEqual(hour_buttons[19].text, "19")
 
     def test_final_guard_rejects_stale_callback(self):
         now = datetime(2026, 10, 2, 18, 0, tzinfo=timezone.utc)
