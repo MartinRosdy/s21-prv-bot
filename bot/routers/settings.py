@@ -39,28 +39,32 @@ SETTINGS_PROMPT = (
 _START_WELCOME = {
     LANG_EN: (
         "Hi! 👋\n"
-        "I monitor School 21 peer reviews and remind you about bookings.\n\n"
-        "Sign in with /login. Your platform password is securely encrypted.\n"
-        "More details: /help"
+        "I monitor Peer Reviews at School 21 and remind you about bookings\n\n"
+        "To get started, sign in:\n"
+        "<b><u>/login</u></b>\n\n"
+        "<blockquote><b>⚠️ Use your School 21 platform login and password</b>\n"
+        "🔒 Your password is securely encrypted with AES-128 and is never stored in plain text</blockquote>\n\n"
+        "Learn more about the features: /help"
     ),
     LANG_RU: (
         "Привет! 👋\n"
         "Я слежу за Peer-проверками в Школе 21 и напоминаю о записях\n\n"
         "Для начала работы необходимо авторизоваться:\n"
         "<b><u>/login</u></b>\n\n"
-        "<i><b>⚠️ Требуется именно логин и пароль от платформы School 21</b></i>\n"
-        "<i>🔒 Пароль надежно шифруется ключом AES-128 и нигде не сохраняется в открытом виде</i>\n\n"
+        "<blockquote><b>⚠️ Требуются именно логин и пароль от платформы School 21</b>\n"
+        "🔒 Пароль надежно шифруется ключом AES-128 и нигде не сохраняется в открытом виде</blockquote>\n\n"
         "Узнать больше о функционале: /help"
     ),
     LANG_UZ: (
         "Salom! 👋\n"
-        "School 21 Peer-tekshiruvlarini kuzataman va yozilishlar haqida eslataman.\n\n"
-        "/login orqali kiring. Platforma paroli xavfsiz shifrlanadi.\n"
-        "Batafsil: /help"
+        "School 21 dagi Peer-tekshiruvlarni kuzataman va yozilishlar haqida eslataman\n\n"
+        "Ishni boshlash uchun avtorizatsiyadan o‘ting:\n"
+        "<b><u>/login</u></b>\n\n"
+        "<blockquote><b>⚠️ Aynan School 21 platformasidagi login va parol talab qilinadi</b>\n"
+        "🔒 Parol AES-128 kaliti bilan ishonchli shifrlanadi va hech qayerda ochiq ko‘rinishda saqlanmaydi</blockquote>\n\n"
+        "Imkoniyatlar haqida batafsil: /help"
     ),
 }
-
-
 
 def start_welcome_text(language: str | None = None) -> str:
     """Localized /start welcome for guests (not signed in)."""

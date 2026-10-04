@@ -46,22 +46,6 @@ _ASK_PASSWORD = {
     LANG_UZ: "School 21 parolingizni kiriting:",
 }
 
-_LOGIN_NOTICE = {
-    LANG_EN: (
-        "<blockquote><b>⚠️ Use your School 21 platform login and password</b>\n"
-        "🔒 Your password is securely encrypted with AES-128 and is never stored in plain text</blockquote>"
-    ),
-    LANG_RU: (
-        "<blockquote><b>⚠️ Требуются именно логин и пароль от платформы School 21</b>\n"
-        "🔒 Пароль надежно шифруется ключом AES-128 и нигде не сохраняется в открытом виде</blockquote>"
-    ),
-    LANG_UZ: (
-        "<blockquote><b>⚠️ School 21 platformasidagi login va paroldan foydalaning</b>\n"
-        "🔒 Parolingiz AES-128 kaliti bilan xavfsiz shifrlanadi va ochiq ko‘rinishda saqlanmaydi</blockquote>"
-    ),
-}
-
-
 _CHECKING = {
     LANG_EN: "🔐 Checking platform access…",
     LANG_RU: "🔐 Проверяю доступ к платформе…",
@@ -211,9 +195,7 @@ def get_auth_router(
             auth_login=None,
         )
         await message.answer(
-            f"{_ASK_LOGIN[normalize_language(lang)]}\n\n"
-            f"{_LOGIN_NOTICE[normalize_language(lang)]}",
-            parse_mode="HTML",
+            _ASK_LOGIN[normalize_language(lang)],
         )
 
     @router.message(AuthStates.waiting_for_login, F.text, ~F.text.startswith("/"))

@@ -11,11 +11,12 @@ from bot.database.models import (
     STATUS_OPEN,
     TrackedEvent,
 )
-from bot.handlers.auth import _ASK_LOGIN, _ASK_PASSWORD, _LOGIN_NOTICE
+from bot.handlers.auth import _ASK_LOGIN, _ASK_PASSWORD
 from bot.handlers.start import FIRST_START_PROMPT, help_text
 from bot.keyboards.menu import build_help_kb, build_main_menu_kb, main_menu_text
 from bot.keyboards.reviews import build_slot_card_kb, build_slots_list_kb
 from bot.routers.reviews import _TEXTS, _slot_card_text
+from bot.routers.settings import start_welcome_text
 
 
 class TestMenuUi(unittest.TestCase):
@@ -101,8 +102,23 @@ class TestMenuUi(unittest.TestCase):
         )
         self.assertEqual(_ASK_LOGIN["ru"], "Введите ваш логин от Школы 21:")
         self.assertEqual(_ASK_PASSWORD["ru"], "Введите ваш пароль от Школы 21:")
-        self.assertIn("<blockquote>", _LOGIN_NOTICE["ru"])
-        self.assertIn("AES-128", _LOGIN_NOTICE["ru"])
+        self.assertNotIn("<blockquote>", _ASK_LOGIN["ru"])
+        self.assertNotIn("⚠️", _ASK_LOGIN["ru"])
+        self.assertNotIn("🔒", _ASK_LOGIN["ru"])
+
+    def test_welcome_localizations_have_identical_full_structure(self):
+        texts = [start_welcome_text(lang) for lang in ("ru", "en", "uz")]
+        self.assertEqual({len(text.splitlines()) for text in texts}, {10})
+        for text in texts:
+            self.assertEqual(text.count("\n\n"), 3)
+            self.assertIn("👋", text)
+            self.assertIn("<b><u>/login</u></b>", text)
+            self.assertEqual(text.count("<blockquote>"), 1)
+            self.assertEqual(text.count("</blockquote>"), 1)
+            self.assertIn("⚠️", text)
+            self.assertIn("🔒", text)
+            self.assertIn("AES-128", text)
+            self.assertTrue(text.endswith("/help"))
 
     def test_empty_slots_text_is_exact(self):
         self.assertEqual(
