@@ -13,18 +13,12 @@ from bot.database.models import DEFAULT_LANGUAGE, LANG_EN, LANG_RU, LANG_UZ
 _MENU_BUTTONS = {
     LANG_EN: {
         "reviews": "📋 My slots",
-        "create": "➕ Create slot",
-        "language": "🌐 Language",
     },
     LANG_RU: {
         "reviews": "📋 Мои слоты",
-        "create": "➕ Создать слот",
-        "language": "🌐 Язык",
     },
     LANG_UZ: {
         "reviews": "📋 Mening slotlarim",
-        "create": "➕ Slot yaratish",
-        "language": "🌐 Til",
     },
 }
 
@@ -51,27 +45,27 @@ _MAIN_MENU_TEXT = {
         "✅ Language set: English\n\n"
         "Current account: {login}\n\n"
         "🏠 Main menu\n\n"
+        "🔍 I am checking: {evaluator_count} | 📖 Being checked: {evaluated_count}\n\n"
         "📋 My slots — Your peer-review slots\n"
-        "Create a slot by choosing a date and time, change or delete an open slot\n"
-        "For a booked slot, use the platform to change its format\n\n"
+        "Create a slot by choosing a date and time, change or delete an open slot\n\n"
         "ℹ️ Use /help to see all commands"
     ),
     LANG_RU: (
         "✅ Язык установлен: Русский\n\n"
         "Текущая авторизация: {login}\n\n"
         "🏠 Главное меню\n\n"
+        "🔍 Я проверяющий: {evaluator_count} | 📖 Меня проверяют: {evaluated_count}\n\n"
         "📋 Мои слоты — Список твоих слотов на пир-ревью\n"
-        "Можно создать слот через пошаговый выбор даты и времени, изменить время или удалить слот\n"
-        "А для занятого — переключить на онлайн формат через платформу Школы 21\n\n"
+        "Можно создать слот через пошаговый выбор даты и времени, изменить время или удалить слот\n\n"
         "ℹ️ Используй /help для просмотра всех команд"
     ),
     LANG_UZ: (
         "✅ Til tanlandi: O'zbekcha\n\n"
         "Joriy akkaunt: {login}\n\n"
         "🏠 Asosiy menyu\n\n"
+        "🔍 Men tekshiruvchiman: {evaluator_count} | 📖 Meni tekshirishadi: {evaluated_count}\n\n"
         "📋 Mening slotlarim — Peer-review slotlaringiz ro‘yxati\n"
-        "Sana va vaqtni tanlab slot yaratish, o‘zgartirish yoki o‘chirish mumkin\n"
-        "Band slot formatini School 21 platformasida o‘zgartiring\n\n"
+        "Sana va vaqtni tanlab slot yaratish, o‘zgartirish yoki o‘chirish mumkin\n\n"
         "ℹ️ Barcha buyruqlarni ko‘rish uchun /help dan foydalaning"
     ),
 }
@@ -93,10 +87,18 @@ def normalize_language(language: str | None) -> str:
     return DEFAULT_LANGUAGE
 
 
-def main_menu_text(language: str | None = None, login: str | None = None) -> str:
+def main_menu_text(
+    language: str | None = None,
+    login: str | None = None,
+    *,
+    evaluator_count: int = 0,
+    evaluated_count: int = 0,
+) -> str:
     """Localized main-menu caption."""
     return _MAIN_MENU_TEXT[normalize_language(language)].format(
-        login=html.escape(login or "—")
+        login=f"<code>{html.escape(login or '—')}</code>",
+        evaluator_count=max(0, evaluator_count),
+        evaluated_count=max(0, evaluated_count),
     )
 
 
@@ -113,18 +115,6 @@ def build_main_menu_kb(language: str | None = None) -> InlineKeyboardMarkup:
         InlineKeyboardButton(
             text=labels["reviews"],
             callback_data="menu_reviews",
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text=labels["create"],
-            callback_data="slot_create",
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text=labels["language"],
-            callback_data="menu_settings",
         )
     )
     return builder.as_markup()

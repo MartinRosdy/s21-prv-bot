@@ -29,6 +29,8 @@ from bot.database.models import (
 )
 from bot.keyboards.menu import normalize_language
 from bot.keyboards.reviews import (
+    MIN_SLOT_DURATION_MINUTES,
+    SlotDurationError,
     SlotWizardCB,
     build_date_picker_kb,
     build_empty_slots_kb,
@@ -112,6 +114,7 @@ _TEXTS = {
         "session_expired": "Session expired, start over",
         "evaluator_only": "Only the evaluator can manage this slot",
         "time_unavailable": "Time unavailable (15-min rule or in past)",
+        "min_duration": "Minimum slot duration is 30 minutes",
         "category_evaluator": "I am checking",
         "category_evaluated": "Being checked",
     },
@@ -169,6 +172,7 @@ _TEXTS = {
         "session_expired": "Сессия истекла, начни заново",
         "evaluator_only": "Управлять слотом может только проверяющий",
         "time_unavailable": "Время недоступно (правило 15 минут или прошло)",
+        "min_duration": "Минимальная длительность слота — 30 минут",
         "category_evaluator": "Я проверяющий",
         "category_evaluated": "Меня проверяют",
     },
@@ -226,6 +230,7 @@ _TEXTS = {
         "session_expired": "Sessiya tugadi, qaytadan boshlang",
         "evaluator_only": "Slotni faqat tekshiruvchi boshqara oladi",
         "time_unavailable": "Vaqt mavjud emas (15 daqiqa qoidasi yoki o‘tgan)",
+        "min_duration": "Slotning minimal davomiyligi — 30 daqiqa",
         "category_evaluator": "Men tekshiruvchiman",
         "category_evaluated": "Meni tekshirishadi",
     },
@@ -665,6 +670,9 @@ def get_reviews_router(
                 end_minute=end_minute,
                 selected_date=date.fromisoformat(str(data["selected_date"])),
             )
+        except SlotDurationError:
+            await callback.answer(_tr(lang, "min_duration"), show_alert=True)
+            return
         except (KeyError, ValueError):
             await callback.answer(
                 _tr(lang, "time_unavailable"),
@@ -776,7 +784,7 @@ def get_reviews_router(
             await callback.answer()
             return
         cat = callback.data.split(":", 1)[1]
-        category_filter = cat if cat in {"evaluator", "evaluated", "open"} else None
+        category_filter = cat if cat in {"evaluator", "evaluated"} else None
         try:
             user = await require_user(db, callback.from_user.id)
         except AuthRequiredError:
@@ -1091,6 +1099,28 @@ def get_reviews_router(
             return
 
         if callback_data.act == "em":
+            start_hour = data.get("start_hour")
+            start_minute = data.get("start_minute")
+            end_hour = data.get("end_hour")
+            try:
+                duration = (
+                    int(end_hour) * 60
+                    + callback_data.val
+                    - int(start_hour) * 60
+                    - int(start_minute)
+                )
+            except (TypeError, ValueError):
+                await callback.answer(
+                    _tr(lang, "session_expired"),
+                    show_alert=True,
+                )
+                return
+            if duration < MIN_SLOT_DURATION_MINUTES:
+                await callback.answer(
+                    _tr(lang, "min_duration"),
+                    show_alert=True,
+                )
+                return
             await state.update_data(end_minute=callback_data.val)
             fresh = await state.get_data()
             await _finish_wizard(callback, state, fresh)

@@ -168,9 +168,18 @@ def get_auth_router(
         # Soft-logged-out rows keep language but have no credentials —
         # allow /login to UPDATE them instead of treating as signed in.
         if existing is not None and existing.is_linked:
+            evaluator_count, evaluated_count = await db.get_active_slot_counts(
+                message.chat.id
+            )
+            menu_text = main_menu_text(
+                lang,
+                existing.s21_login,
+                evaluator_count=evaluator_count,
+                evaluated_count=evaluated_count,
+            )
             await message.answer(
                 f"{_ALREADY_AUTH[normalize_language(lang)]}\n\n"
-                f"{main_menu_text(lang, existing.s21_login)}",
+                f"{menu_text}",
                 reply_markup=build_main_menu_kb(lang),
                 parse_mode="HTML",
             )
@@ -271,8 +280,14 @@ def get_auth_router(
         except Exception:
             logger.debug("sync_user_bot_commands after login failed", exc_info=True)
 
+        evaluator_count, evaluated_count = await db.get_active_slot_counts(chat_id)
         await status_msg.edit_text(
-            main_menu_text(lang, saved.s21_login if saved else login),
+            main_menu_text(
+                lang,
+                saved.s21_login if saved else login,
+                evaluator_count=evaluator_count,
+                evaluated_count=evaluated_count,
+            ),
             reply_markup=build_main_menu_kb(lang),
             parse_mode="HTML",
         )

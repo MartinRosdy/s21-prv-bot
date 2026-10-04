@@ -7,6 +7,8 @@ from unittest.mock import patch
 from bot.core.utils import TASHKENT_TZ
 from bot.keyboards.reviews import (
     MIN_BOOKING_LEAD_MINUTES,
+    MIN_SLOT_DURATION_MINUTES,
+    SlotDurationError,
     _is_slot_time_valid_today,
     build_hour_picker_kb,
     build_minute_picker_kb,
@@ -99,8 +101,26 @@ class TestTimeGrid(unittest.TestCase):
             if button.callback_data and button.callback_data.startswith("sw:")
         ]
         self.assertEqual(hour_buttons[0].text, ".")
-        self.assertEqual(hour_buttons[18].text, "18")  # 18:45 is still valid
+        # 18:45 stays reachable so the FSM can show the explicit 30-min alert.
+        self.assertEqual(hour_buttons[18].text, "18")
         self.assertEqual(hour_buttons[19].text, "19")
+
+    def test_15_minute_end_stays_clickable_for_specific_alert(self):
+        kb = build_minute_picker_kb(
+            which="em",
+            day_offset=1,
+            hour=18,
+            start_hour=18,
+            start_minute=30,
+        )
+        row = kb.inline_keyboard[0]
+        self.assertEqual(row[3].text, "45")
+        self.assertEqual(row[3].callback_data, "sw:em:45")
+
+    def test_late_start_without_30_minute_end_is_disabled(self):
+        kb = build_minute_picker_kb(which="sm", day_offset=1, hour=23)
+        row = kb.inline_keyboard[0]
+        self.assertEqual([button.text for button in row], ["00", "15", ".", "."])
 
     def test_final_guard_rejects_stale_callback(self):
         now = datetime(2026, 10, 2, 18, 0, tzinfo=timezone.utc)
@@ -120,6 +140,27 @@ class TestTimeGrid(unittest.TestCase):
                 end_hour=18,
                 end_minute=15,
             )
+
+    def test_compose_rejects_15_minute_slot(self):
+        with self.assertRaises(SlotDurationError):
+            compose_slot_datetimes(
+                day_offset=1,
+                start_hour=18,
+                start_minute=30,
+                end_hour=18,
+                end_minute=45,
+            )
+        self.assertEqual(MIN_SLOT_DURATION_MINUTES, 30)
+
+    def test_compose_accepts_30_minute_slot(self):
+        start, end = compose_slot_datetimes(
+            day_offset=1,
+            start_hour=18,
+            start_minute=30,
+            end_hour=19,
+            end_minute=0,
+        )
+        self.assertEqual(end - start, timedelta(minutes=30))
 
 
 if __name__ == "__main__":

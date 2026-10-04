@@ -23,12 +23,20 @@ _NEED_AUTH = {
 async def send_main_menu(
     message: Message,
     *,
+    db: Database,
+    user_id: int,
     language: str | None = None,
     login: str | None = None,
     edit: bool = False,
 ) -> None:
     """Render the main menu as a new message or an edited one."""
-    text = main_menu_text(language, login)
+    evaluator_count, evaluated_count = await db.get_active_slot_counts(user_id)
+    text = main_menu_text(
+        language,
+        login,
+        evaluator_count=evaluator_count,
+        evaluated_count=evaluated_count,
+    )
     markup = build_main_menu_kb(language)
     if edit:
         await message.edit_text(
@@ -75,6 +83,8 @@ def get_menu_router(db: Database) -> Router:
 
         await send_main_menu(
             callback.message,
+            db=db,
+            user_id=callback.from_user.id,
             language=user.language,
             login=user.s21_login,
             edit=False,

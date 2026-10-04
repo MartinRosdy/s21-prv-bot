@@ -255,8 +255,16 @@ def get_settings_router(db: Database, bot: Optional[Bot] = None) -> Router:
 
         # Authenticated /lang from settings: confirm + main menu.
         await state.clear()
+        evaluator_count, evaluated_count = await db.get_active_slot_counts(
+            callback.from_user.id
+        )
         await callback.message.edit_text(
-            main_menu_text(language, user.s21_login if user else None),
+            main_menu_text(
+                language,
+                user.s21_login if user else None,
+                evaluator_count=evaluator_count,
+                evaluated_count=evaluated_count,
+            ),
             reply_markup=build_main_menu_kb(language),
             parse_mode="HTML",
         )

@@ -9,7 +9,14 @@ from typing import Any, Optional
 
 import aiosqlite
 
-from bot.database.models import DEFAULT_LANGUAGE, TrackedEvent, User
+from bot.database.models import (
+    DEFAULT_LANGUAGE,
+    REVIEW_EVENT_TYPES,
+    ROLE_EVALUATED,
+    ROLE_EVALUATOR,
+    TrackedEvent,
+    User,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +357,20 @@ class Database:
             )
         rows = await cursor.fetchall()
         return [self._row_to_event(r) for r in rows]
+
+    async def get_active_slot_counts(self, user_id: int) -> tuple[int, int]:
+        """Return evaluator/evaluated counts shown in the main menu."""
+        events = await self.get_events(user_id, active_only=True)
+        evaluator_count = 0
+        evaluated_count = 0
+        for event in events:
+            if event.type not in REVIEW_EVENT_TYPES:
+                continue
+            if event.effective_role == ROLE_EVALUATED:
+                evaluated_count += 1
+            elif event.effective_role == ROLE_EVALUATOR:
+                evaluator_count += 1
+        return evaluator_count, evaluated_count
 
     async def get_event_by_id(self, event_id: int) -> Optional[TrackedEvent]:
         """Fetch a single row by primary key (used by reminder jobs)."""

@@ -314,6 +314,18 @@ class PeerReviewScheduler:
             )
             return
 
+        # The user may have logged out while auth/calendar requests were in
+        # flight. Do not mutate platform slots or repopulate local events from
+        # a stale User object after credentials have been cleared.
+        current_user = await self._db.get_user(user.telegram_chat_id)
+        if current_user is None or not current_user.is_linked:
+            logger.info(
+                "Poll discarded after logout for chat_id=%s",
+                user.telegram_chat_id,
+            )
+            return
+        user = current_user
+
         reconcile_snapshot = snapshot
         # Slot splitting: if user opened a long slot and has an evaluated booking
         # colliding with it. Never persist the synthetic plan as API truth.
@@ -327,7 +339,6 @@ class PeerReviewScheduler:
                 len(plan.slots_to_delete),
             )
             if token:
-                mutation_failed = False
                 for u in plan.slots_to_update:
                     try:
                         await self._api.update_slot(
@@ -337,7 +348,6 @@ class PeerReviewScheduler:
                             u["new_end_utc"],
                         )
                     except Exception as exc:
-                        mutation_failed = True
                         logger.warning("Failed to sync updated split slot on API: %s", exc)
 
                 for c in plan.slots_to_create:
@@ -348,31 +358,38 @@ class PeerReviewScheduler:
                             c["new_end_utc"],
                         )
                     except Exception as exc:
-                        mutation_failed = True
                         logger.warning("Failed to sync created split slot on API: %s", exc)
 
                 for d in plan.slots_to_delete:
                     try:
                         await self._api.delete_slot(token, str(d["event_slot_id"]))
                     except Exception as exc:
-                        mutation_failed = True
                         logger.warning("Failed to delete split slot on API: %s", exc)
 
-                if not mutation_failed:
-                    async with self._api_semaphore:
-                        try:
-                            refreshed = await self._api.fetch_calendar_events(token)
-                        except S21ApiError as exc:
-                            logger.warning(
-                                "Post-split calendar refresh failed for user %s: %s",
-                                user.telegram_chat_id,
-                                exc,
-                            )
-                        else:
-                            if refreshed is not None:
-                                reconcile_snapshot = refreshed
+                # A batch may succeed only partially. Always re-read platform
+                # truth so the next reconciliation neither stores a synthetic
+                # plan nor repeats already successful create operations.
+                async with self._api_semaphore:
+                    try:
+                        refreshed = await self._api.fetch_calendar_events(token)
+                    except S21ApiError as exc:
+                        logger.warning(
+                            "Post-split calendar refresh failed for user %s: %s",
+                            user.telegram_chat_id,
+                            exc,
+                        )
+                    else:
+                        if refreshed is not None:
+                            reconcile_snapshot = refreshed
 
-        await self._reconcile(user, reconcile_snapshot)
+        current_user = await self._db.get_user(user.telegram_chat_id)
+        if current_user is None or not current_user.is_linked:
+            logger.info(
+                "Reconcile skipped after logout for chat_id=%s",
+                user.telegram_chat_id,
+            )
+            return
+        await self._reconcile(current_user, reconcile_snapshot)
 
     async def _reconcile(
         self,

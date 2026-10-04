@@ -24,6 +24,11 @@ from bot.keyboards.menu import normalize_language
 
 # Minimum advance notice for booking or creating slots on the current day
 MIN_BOOKING_LEAD_MINUTES: int = 15
+MIN_SLOT_DURATION_MINUTES: int = 30
+
+
+class SlotDurationError(ValueError):
+    """Selected end time makes the slot shorter than the allowed minimum."""
 
 
 class SlotWizardCB(CallbackData, prefix="sw"):
@@ -72,11 +77,8 @@ _LABELS = {
         "tomorrow": "📅 Tomorrow",
         "make_offline": "🏢 Switch to Offline",
         "make_online": "🌐 Switch to Online",
-        "category_evaluator": "🔍 I am checking",
-        "category_evaluated": "📖 Being checked",
         "time_unavailable": "Time unavailable",
         "status_free": "⏳ Free",
-        "free_slots": "📋 Free slots",
     },
     LANG_RU: {
         "create_slot": "➕ Создать слот",
@@ -90,11 +92,8 @@ _LABELS = {
         "tomorrow": "📅 Завтра",
         "make_offline": "🏢 Переключить на Офлайн",
         "make_online": "🌐 Переключить на Онлайн",
-        "category_evaluator": "🔍 Я проверяющий",
-        "category_evaluated": "📖 Меня проверяют",
         "time_unavailable": "Время недоступно",
         "status_free": "⏳ Свободен",
-        "free_slots": "📋 Свободные слоты",
     },
     LANG_UZ: {
         "create_slot": "➕ Slot yaratish",
@@ -108,11 +107,8 @@ _LABELS = {
         "tomorrow": "📅 Ertaga",
         "make_offline": "🏢 Offlinega o‘tkazish",
         "make_online": "🌐 Onlinega o‘tkazish",
-        "category_evaluator": "🔍 Men tekshiruvchiman",
-        "category_evaluated": "📖 Meni tekshirishadi",
         "time_unavailable": "Vaqt mavjud emas",
         "status_free": "⏳ Bo‘sh",
-        "free_slots": "📋 Bo‘sh slotlar",
     },
 }
 
@@ -151,35 +147,25 @@ def build_slots_list_kb(
     1. 🔍 Evaluator (I check)
     2. 📖 Evaluated (Being checked)
 
-    Every category is labeled; open slots are a subset of evaluator slots.
+    Compact role filters followed by matching slot cards.
     """
     builder = InlineKeyboardBuilder()
     lang = normalize_language(language)
 
     evaluator_slots = [s for s in slots if s.effective_role == ROLE_EVALUATOR]
     evaluated_slots = [s for s in slots if s.effective_role == ROLE_EVALUATED]
-    free_slots = [s for s in evaluator_slots if s.status == STATUS_OPEN]
-
     # Category switcher buttons at the top
     evaluator_count = len(evaluator_slots)
     evaluated_count = len(evaluated_slots)
 
     builder.row(
         InlineKeyboardButton(
-            text=f"{_t(lang, 'category_evaluator')} ({evaluator_count})",
+            text=f"🔍 ({evaluator_count})",
             callback_data="slot_cat:evaluator",
-        )
-    )
-    builder.row(
+        ),
         InlineKeyboardButton(
-            text=f"{_t(lang, 'category_evaluated')} ({evaluated_count})",
+            text=f"📖 ({evaluated_count})",
             callback_data="slot_cat:evaluated",
-        )
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text=f"{_t(lang, 'free_slots')} ({len(free_slots)})",
-            callback_data="slot_cat:open",
         ),
     )
 
@@ -189,14 +175,13 @@ def build_slots_list_kb(
         slots_to_render = evaluator_slots
     elif category_filter == "evaluated":
         slots_to_render = evaluated_slots
-    elif category_filter == "open":
-        slots_to_render = free_slots
-
     for slot in slots_to_render:
         if slot.id is None:
             continue
         when = format_datetime(slot.start_time, slot.end_time, language=lang)
-        fmt_str = ("🌐" if slot.data.get("is_online") else "🏢") if slot.status == STATUS_BOOKED else ""
+        fmt_str = (
+            "🌐" if slot.data.get("is_online") else "🏢"
+        ) if slot.status == STATUS_BOOKED else ""
 
         if slot.effective_role == ROLE_EVALUATED:
             peer = slot.data.get("peer_login") or "..."
@@ -377,6 +362,29 @@ def _is_slot_time_valid_today(
     return (candidate - now_local) >= timedelta(minutes=lead_minutes)
 
 
+def _duration_minutes(
+    start_hour: int,
+    start_minute: int,
+    end_hour: int,
+    end_minute: int,
+) -> int:
+    """Return same-day interval length in minutes."""
+    return (end_hour * 60 + end_minute) - (start_hour * 60 + start_minute)
+
+
+def _has_positive_end_in_hour(
+    end_hour: int,
+    start_hour: int,
+    start_minute: int,
+) -> bool:
+    """Whether an end-hour has a positive endpoint to present to the user."""
+    return any(
+        _duration_minutes(start_hour, start_minute, end_hour, minute)
+        > 0
+        for minute in (0, 15, 30, 45)
+    )
+
+
 def build_hour_picker_kb(
     *,
     which: str,
@@ -389,10 +397,10 @@ def build_hour_picker_kb(
     """
     Step 2 / 4: hours 0–23 in a 4-column grid.
 
-    15-Min Rule:
+    Time guards:
     For today (day_offset == 0), if all 4 minutes of an hour fail the 15-min rule
-    (or for end hour, are not after start_time), the cell is replaced by '.'
-    and clicking returns a disabled callback.
+    (or for end hour, are not after start_time), the cell is replaced by '.'.
+    Start values also need room for the 30-minute minimum duration.
     """
     builder = InlineKeyboardBuilder()
     buttons: list[InlineKeyboardButton] = []
@@ -405,14 +413,18 @@ def build_hour_picker_kb(
             # Start hour is valid if at least one quarter hour is valid.
             is_valid = any(
                 _is_slot_time_valid_today(hour, m, now_local)
+                and _duration_minutes(hour, m, 23, 45)
+                >= MIN_SLOT_DURATION_MINUTES
                 for m in (0, 15, 30, 45)
             )
         elif which == "eh" and start_hour is not None:
-            # End must be later than start for every selected date, not only today.
-            if hour < start_hour:
-                is_valid = False
-            elif hour == start_hour and (start_minute or 0) >= 45:
-                is_valid = False
+            # Keep an hour with a 15-minute endpoint selectable. The minute
+            # callback then explains the 30-minute minimum with an alert.
+            is_valid = _has_positive_end_in_hour(
+                hour,
+                start_hour,
+                start_minute or 0,
+            )
 
         if is_valid:
             label = _mark_current(
@@ -445,9 +457,10 @@ def build_minute_picker_kb(
     """
     Step 3 / 5: minutes [00] [15] [30] [45].
 
-    15-Min Rule:
+    Time guards:
     For today (day_offset == 0), minutes that fail the 15-min rule (or end minutes <= start)
-    are replaced by '.' and clicking returns a disabled callback.
+    are replaced by '.'. Positive 15-minute end values reach the FSM so it can
+    show the user the explicit minimum-duration alert.
     """
     builder = InlineKeyboardBuilder()
     now_local = utc_now().astimezone(TASHKENT_TZ)
@@ -461,13 +474,22 @@ def build_minute_picker_kb(
                 hour, minute, now_local
             ):
                 is_valid = False
-            # The wizard creates same-day slots; 23:45 has no valid end value.
-            if hour == 23 and minute == 45:
+            # The wizard creates same-day slots; leave room for a 30-min end.
+            if (
+                _duration_minutes(hour, minute, 23, 45)
+                < MIN_SLOT_DURATION_MINUTES
+            ):
                 is_valid = False
         elif which == "em" and start_hour is not None:
-            if hour < start_hour:
-                is_valid = False
-            elif hour == start_hour and minute <= (start_minute or 0):
+            # A 15-minute endpoint stays clickable: the FSM returns a clear
+            # alert and keeps the user on this step. Non-positive values are
+            # always disabled.
+            if _duration_minutes(
+                start_hour,
+                start_minute or 0,
+                hour,
+                minute,
+            ) <= 0:
                 is_valid = False
 
         if is_valid:
@@ -546,6 +568,10 @@ def compose_slot_datetimes(
     )
     if local_end <= local_start:
         raise ValueError("slot end must be later than slot start")
+    if local_end - local_start < timedelta(minutes=MIN_SLOT_DURATION_MINUTES):
+        raise SlotDurationError(
+            f"slot duration must be at least {MIN_SLOT_DURATION_MINUTES} minutes"
+        )
     utc = timezone.utc
     return local_start.astimezone(utc), local_end.astimezone(utc)
 
