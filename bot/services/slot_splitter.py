@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from bot.core.utils import parse_iso_utc, utc_iso
@@ -19,6 +19,8 @@ from bot.database.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+MIN_SPLIT_SLOT_DURATION = timedelta(minutes=30)
 
 
 @dataclass
@@ -140,6 +142,15 @@ def calculate_slot_splits(
 
         if current_start < slot.end:
             pieces.append((current_start, slot.end))
+
+        # The platform/user-facing wizard does not allow 15-minute slots.
+        # Discard tiny remainders instead of retrying an invalid mutation on
+        # every scheduler pass.
+        pieces = [
+            piece
+            for piece in pieces
+            if piece[1] - piece[0] >= MIN_SPLIT_SLOT_DURATION
+        ]
 
         if not pieces:
             # Slot is completely consumed by bookings

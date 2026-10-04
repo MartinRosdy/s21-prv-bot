@@ -162,6 +162,41 @@ class TestSlotSplitter(unittest.TestCase):
         self.assertEqual(len(plan.normalized_items), 1)
         self.assertEqual(plan.normalized_items[0].s21_event_id, "booking-full")
 
+    def test_split_drops_15_minute_remainder(self):
+        """Automatic splitting must never create a forbidden short slot."""
+        items = [
+            CalendarSnapshotItem(
+                s21_event_id="slot-short-edge",
+                type=EVENT_TYPE_SLOT,
+                status=STATUS_OPEN,
+                start_time="2026-10-02T19:00:00.000Z",
+                end_time="2026-10-02T20:00:00.000Z",
+                role=ROLE_EVALUATOR,
+                data={"event_slot_id": "901"},
+            ),
+            CalendarSnapshotItem(
+                s21_event_id="booking-short-edge",
+                type=EVENT_TYPE_PEER_REVIEW,
+                status=STATUS_BOOKED,
+                start_time="2026-10-02T19:15:00.000Z",
+                end_time="2026-10-02T19:30:00.000Z",
+                role=ROLE_EVALUATED,
+            ),
+        ]
+
+        plan = calculate_slot_splits(items)
+
+        self.assertEqual(len(plan.slots_to_update), 1)
+        self.assertEqual(
+            plan.slots_to_update[0]["new_start_utc"],
+            "2026-10-02T19:30:00.000Z",
+        )
+        self.assertEqual(
+            plan.slots_to_update[0]["new_end_utc"],
+            "2026-10-02T20:00:00.000Z",
+        )
+        self.assertEqual(plan.slots_to_create, [])
+
 
 if __name__ == "__main__":
     unittest.main()

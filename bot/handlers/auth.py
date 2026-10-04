@@ -12,7 +12,7 @@ from aiogram.types import Message
 from bot.database.db import Database
 from bot.database.models import DEFAULT_LANGUAGE, LANG_EN, LANG_RU, LANG_UZ, SUPPORTED_LANGUAGES
 from bot.keyboards.menu import build_main_menu_kb, main_menu_text, normalize_language
-from bot.routers.settings import start_welcome_text, sync_user_bot_commands
+from bot.routers.settings import sync_user_bot_commands
 from bot.services.crypto import CryptoService
 from bot.services.s21_api import S21ApiClient, S21AuthError, S21NetworkError
 from bot.states.auth import AuthStates
@@ -35,15 +35,15 @@ _ALREADY_AUTH = {
 }
 
 _ASK_LOGIN = {
-    LANG_EN: "Enter your School 21 login (e.g. lomasadr):",
-    LANG_RU: "Введите ваш логин от Школы 21 (например, lomasadr):",
-    LANG_UZ: "School 21 loginingizni kiriting (masalan, lomasadr):",
+    LANG_EN: "Enter your School 21 login:",
+    LANG_RU: "Введите ваш логин от Школы 21:",
+    LANG_UZ: "School 21 loginingizni kiriting:",
 }
 
 _ASK_PASSWORD = {
-    LANG_EN: "Enter your School 21 platform password (it is securely encrypted):",
-    LANG_RU: "Введите пароль от платформы Школы 21 (он безопасно шифруется):",
-    LANG_UZ: "School 21 platformasi parolini kiriting (u xavfsiz shifrlanadi):",
+    LANG_EN: "Enter your School 21 password:",
+    LANG_RU: "Введите ваш пароль от Школы 21:",
+    LANG_UZ: "School 21 parolingizni kiriting:",
 }
 
 
@@ -164,6 +164,9 @@ def get_auth_router(
             return
 
         lang = await _resolve_lang(db, message, state)
+        fsm_data = await state.get_data()
+        pending_language = fsm_data.get("pending_language")
+        await state.clear()
         existing = await db.get_user(message.chat.id)
         # Soft-logged-out rows keep language but have no credentials —
         # allow /login to UPDATE them instead of treating as signed in.
@@ -185,9 +188,6 @@ def get_auth_router(
             )
             return
 
-        fsm_data = await state.get_data()
-        pending_language = fsm_data.get("pending_language")
-
         # Preserve pending_language across FSM restart.
         await state.set_state(AuthStates.waiting_for_login)
         await state.update_data(
@@ -196,8 +196,7 @@ def get_auth_router(
             auth_login=None,
         )
         await message.answer(
-            f"{start_welcome_text(lang)}\n\n{_ASK_LOGIN[normalize_language(lang)]}",
-            parse_mode="HTML",
+            _ASK_LOGIN[normalize_language(lang)],
         )
 
     @router.message(AuthStates.waiting_for_login, F.text, ~F.text.startswith("/"))
@@ -210,10 +209,7 @@ def get_auth_router(
 
         await state.update_data(auth_login=login)
         await state.set_state(AuthStates.waiting_for_password)
-        await message.answer(
-            _ASK_PASSWORD[normalize_language(lang)],
-            parse_mode="Markdown",
-        )
+        await message.answer(_ASK_PASSWORD[normalize_language(lang)])
 
     @router.message(AuthStates.waiting_for_password, F.text, ~F.text.startswith("/"))
     async def process_password(message: Message, state: FSMContext) -> None:
@@ -228,7 +224,7 @@ def get_auth_router(
 
         if not login:
             await state.set_state(AuthStates.waiting_for_login)
-            await message.answer(_ASK_LOGIN[lang], parse_mode="Markdown")
+            await message.answer(_ASK_LOGIN[lang])
             return
 
         if not password:

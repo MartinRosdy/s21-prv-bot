@@ -11,9 +11,11 @@ from bot.database.models import (
     STATUS_OPEN,
     TrackedEvent,
 )
-from bot.handlers.start import help_text
+from bot.handlers.auth import _ASK_LOGIN, _ASK_PASSWORD
+from bot.handlers.start import FIRST_START_PROMPT, help_text
 from bot.keyboards.menu import build_main_menu_kb, main_menu_text
-from bot.keyboards.reviews import build_slots_list_kb
+from bot.keyboards.reviews import build_slot_card_kb, build_slots_list_kb
+from bot.routers.reviews import _slot_card_text
 
 
 class TestMenuUi(unittest.TestCase):
@@ -26,7 +28,7 @@ class TestMenuUi(unittest.TestCase):
         )
         self.assertIn("<code>peer&lt;&amp;</code>", text)
         self.assertIn("🔍 Я проверяющий: 2 | 📖 Меня проверяют: 1", text)
-        self.assertNotIn("А для занятого", text)
+        self.assertIn("А для занятого — переключить на онлайн формат", text)
 
         keyboard = build_main_menu_kb("ru")
         buttons = [button for row in keyboard.inline_keyboard for button in row]
@@ -52,12 +54,13 @@ class TestMenuUi(unittest.TestCase):
                 status=STATUS_BOOKED,
                 start_time="2999-10-02T20:00:00.000Z",
                 role=ROLE_EVALUATED,
+                data={"peer_login": "peer_student"},
             ),
         ]
         keyboard = build_slots_list_kb(slots, "ru")
         self.assertEqual(
             [button.text for button in keyboard.inline_keyboard[0]],
-            ["🔍 (1)", "📖 (1)"],
+            ["🔍 1", "📖 1"],
         )
         callbacks = {
             button.callback_data
@@ -65,12 +68,47 @@ class TestMenuUi(unittest.TestCase):
             for button in row
         }
         self.assertNotIn("slot_cat:open", callbacks)
+        button_text = " ".join(
+            button.text
+            for row in keyboard.inline_keyboard
+            for button in row
+        )
+        self.assertNotIn("peer_student", button_text)
+
+    def test_peer_login_is_copyable_in_slot_card(self):
+        slot = TrackedEvent(
+            id=3,
+            user_id=100,
+            s21_event_id="booked-card",
+            type=EVENT_TYPE_PEER_REVIEW,
+            status=STATUS_BOOKED,
+            start_time="2999-10-02T20:00:00.000Z",
+            role=ROLE_EVALUATED,
+            data={"peer_login": "peer_student", "is_online": False},
+        )
+        self.assertIn("`peer_student`", _slot_card_text(slot, "ru"))
+        button_texts = [
+            button.text
+            for row in build_slot_card_kb(slot, "ru").inline_keyboard
+            for button in row
+        ]
+        self.assertIn("🌐 Переключить на Онлайн", button_texts)
+
+    def test_first_start_and_auth_prompts_are_short(self):
+        self.assertEqual(
+            FIRST_START_PROMPT,
+            "Выберите язык / Choose language / Tilni tanlang",
+        )
+        self.assertEqual(_ASK_LOGIN["ru"], "Введите ваш логин от Школы 21:")
+        self.assertEqual(_ASK_PASSWORD["ru"], "Введите ваш пароль от Школы 21:")
+        self.assertNotIn(">", _ASK_LOGIN["ru"] + _ASK_PASSWORD["ru"])
 
     def test_help_has_exact_t15_line(self):
         text = help_text("ru")
         exact = "2. ⏳ За 15 минут: напоминание с никнеймом пира, ролью и форматом"
         self.assertIn(exact, text)
         self.assertNotIn("кнопка смены формата", text.lower())
+        self.assertIn("А для занятого — переключить на онлайн формат", text)
 
 
 if __name__ == "__main__":

@@ -23,16 +23,7 @@ from bot.keyboards.menu import (
 from bot.routers.menu import send_main_menu
 
 
-FIRST_START_PROMPT = (
-    "Привет! 👋\n"
-    "Я слежу за Peer-проверками в Школе 21 и напоминаю о записях\n\n"
-    "Для начала работы необходимо авторизоваться:\n"
-    "<b><u>/login</u></b>\n\n"
-    "<i><b>⚠️ Требуется именно логин и пароль от платформы School 21</b></i>\n"
-    "<i>🔒 Пароль надежно шифруется ключом AES-128 и нигде не сохраняется в открытом виде</i>\n\n"
-    "Узнать больше о функционале: /help\n\n"
-    "Выберите язык / Choose language / Tilni tanlang"
-)
+FIRST_START_PROMPT = "Выберите язык / Choose language / Tilni tanlang"
 
 _SUPPORT_BLOCK = {
     LANG_EN: (
@@ -67,7 +58,7 @@ _HELP_TEXT = {
         "🏢 *Review Formats:*\n"
         "• 🏢 *Offline:* on-campus review at the workstation.\n"
         "• 🌐 *Online:* remote review with video call link.\n"
-        "Open slots have no format; change booked reviews on the School 21 platform.\n\n"
+        "Open slots have no format; switch booked reviews to online format.\n\n"
         "⚡️ *Automatic Slot Splitting:*\n"
         "If you have an open duty slot (e.g. 19:00 - 22:00) and sign up for a review at 19:30, "
         "the bot automatically splits your schedule:\n"
@@ -103,7 +94,7 @@ _HELP_TEXT = {
         "🏢 *Форматы проверок:*\n"
         "• 🏢 *Офлайн:* очная проверка в кампусе за рабочей станцией.\n"
         "• 🌐 *Онлайн:* дистанционная проверка со ссылкой на видеоконференцию.\n"
-        "У пустого слота нет формата; формат занятого ревью меняется на платформе Школы 21.\n\n"
+        "У пустого слота нет формата; а для занятого — переключить на онлайн формат.\n\n"
         "⚡️ *Умное разделение слотов:*\n"
         "Если у тебя открыт длинный слот (например, 19:00 - 22:00) и ты сам записываешься на проверку в 19:30, "
         "система автоматически разделит твой график:\n"
@@ -139,7 +130,7 @@ _HELP_TEXT = {
         "🏢 *Tekshiruv formatlari:*\n"
         "• 🏢 *Offline:* kampusda bevosita ish stantsiyasida tekshiruv.\n"
         "• 🌐 *Online:* videoaloqa havolasi orqali masofaviy tekshiruv.\n"
-        "Bo‘sh slotda format yo‘q; band review formatini School 21 platformasida o‘zgartiring.\n\n"
+        "Bo‘sh slotda format yo‘q; band reviewni onlayn formatga o‘tkazing.\n\n"
         "⚡️ *Slotlarni avtomatik bo‘lish:*\n"
         "Agar sizda uzun slot ochilgan bo‘lsa (masalan, 19:00 - 22:00) va 19:30 ga tekshiruvga yozilsangiz, "
         "tizim jadvalingizni avtomatik ravishda ajratadi:\n"
@@ -174,7 +165,8 @@ _HELP_HTML = {
         "где ты оцениваешь чужой проект\n"
         "• 📖 — Меня проверяют (Evaluated): записи на ревью, где другой пир проверяет твой проект\n\n"
         "⏳ <b>Правило 15 минут (15-Min Rule):</b>\n"
-        "• Записаться на проверку или создать слот можно минимум за 15 минут до ее начала\n\n"
+        "• Записаться на проверку или создать слот можно минимум за 15 минут до ее начала\n"
+        "• А для занятого — переключить на онлайн формат\n\n"
         "🔔 <b>4 этапа уведомлений:</b>\n"
         "1. 🔥 Моментально: при любой новой записи\n"
         "2. ⏳ За 15 минут: напоминание с никнеймом пира, ролью и форматом\n"
@@ -195,7 +187,7 @@ _HELP_HTML = {
         "The bot tracks your School 21 peer reviews and sends booking and start reminders.\n"
         "Create or change a slot at least 15 minutes before it starts.\n"
         "🔍 Checking — you evaluate a peer; 📖 Being checked — a peer evaluates you.\n"
-        "A booked review has a format button at T-15; changing format currently requires the platform.\n\n"
+        "For a booked slot — switch it to online format.\n\n"
         "Commands: /start, /help, /lang, /login, /logout, /cancel\n"
         "Support: @A_Martin_Rosdy"
     ),
@@ -204,7 +196,7 @@ _HELP_HTML = {
         "Bot School 21 peer-review slotlarini kuzatadi va eslatmalar yuboradi.\n"
         "Slot boshlanishidan kamida 15 daqiqa oldin yaratiladi yoki o‘zgartiriladi.\n"
         "🔍 Tekshiruvchi — siz tekshirasiz; 📖 Tekshiriluvchi — sizni tekshirishadi.\n"
-        "Band slot formatini hozircha faqat platformada o‘zgartirish mumkin.\n\n"
+        "Band slotni onlayn formatga o‘tkazish mumkin.\n\n"
         "Buyruqlar: /start, /help, /lang, /login, /logout, /cancel\n"
         "Yordam: @A_Martin_Rosdy"
     ),
@@ -267,15 +259,15 @@ def get_start_router(db: Database) -> Router:
         fsm_data = await state.get_data()
         pending = fsm_data.get("pending_language")
         from_start = fsm_data.get("from_start")
-        # Keep pending_language / from_start for first-start; only drop wizard.
+        # Drop any active auth/slot flow, preserving onboarding language only.
         current = await state.get_state()
         if current is not None:
-            await state.set_state(None)
             restore: dict = {}
             if pending:
                 restore["pending_language"] = pending
             if from_start:
                 restore["from_start"] = True
+            await state.clear()
             if restore:
                 await state.update_data(**restore)
         lang = (

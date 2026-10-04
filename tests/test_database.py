@@ -72,6 +72,45 @@ class TestDatabase(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(evaluator_count, 2)
                 self.assertEqual(evaluated_count, 1)
 
+                # A status-only patch must not erase fresh event metadata.
+                await db.update_event_status(event_id, STATUS_OPEN)
+                patched = await db.get_event_by_id(event_id)
+                self.assertIsNotNone(patched)
+                assert patched is not None
+                self.assertEqual(patched.status, STATUS_OPEN)
+                self.assertEqual(patched.type, EVENT_TYPE_PEER_REVIEW)
+                self.assertEqual(
+                    patched.start_time,
+                    "2999-10-02T19:30:00.000Z",
+                )
+
+                with self.assertRaises(RuntimeError):
+                    async with db.transaction() as connection:
+                        await db._execute_write(
+                            connection,
+                            "DELETE FROM events WHERE user_id = ?",
+                            (100,),
+                        )
+                        raise RuntimeError("force rollback")
+
+                # The failed transaction must not leak a partial DELETE.
+                events_after_rollback = await db.get_events(100)
+                self.assertEqual(len(events_after_rollback), 3)
+
+                self.assertTrue(await db.clear_user_credentials(100))
+                with self.assertRaises(RuntimeError):
+                    await db.upsert_event(
+                        TrackedEvent(
+                            id=None,
+                            user_id=100,
+                            s21_event_id="late-poll",
+                            type=EVENT_TYPE_SLOT,
+                            status=STATUS_OPEN,
+                            start_time="2999-10-02T22:00:00.000Z",
+                        )
+                    )
+                self.assertEqual(await db.get_events(100), [])
+
             self.assertIsNone(db._conn)
 
 

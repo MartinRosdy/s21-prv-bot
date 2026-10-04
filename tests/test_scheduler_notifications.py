@@ -4,10 +4,13 @@ import unittest
 from unittest.mock import AsyncMock
 from bot.database.models import (
     EVENT_TYPE_PEER_REVIEW,
+    EVENT_TYPE_SLOT,
     ROLE_EVALUATED,
     ROLE_EVALUATOR,
     STATUS_BOOKED,
+    STATUS_OPEN,
     TrackedEvent,
+    User,
 )
 from bot.services.scheduler import (
     PeerReviewScheduler,
@@ -155,6 +158,56 @@ class TestBookingNotificationGuard(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(await scheduler._notify_booking_once(100, event, "old"))
         db.update_event_status.assert_awaited_once_with(11, "COMPLETED")
+        bot.send_message.assert_not_awaited()
+
+    async def test_stale_reminder_for_open_slot_is_skipped(self):
+        db = AsyncMock()
+        db.get_event_by_id.return_value = TrackedEvent(
+            id=12,
+            user_id=100,
+            s21_event_id="open-again",
+            type=EVENT_TYPE_SLOT,
+            status=STATUS_OPEN,
+            start_time="2999-10-02T19:30:00.000Z",
+        )
+        bot = AsyncMock()
+        scheduler = PeerReviewScheduler(
+            bot=bot,
+            db=db,
+            crypto=None,  # type: ignore
+            api=None,  # type: ignore
+        )
+
+        await scheduler.send_reminder(12, 15)
+
+        bot.send_message.assert_not_awaited()
+        db.get_user.assert_not_awaited()
+
+    async def test_reminder_after_logout_is_skipped(self):
+        db = AsyncMock()
+        db.get_event_by_id.return_value = TrackedEvent(
+            id=13,
+            user_id=100,
+            s21_event_id="booked-before-logout",
+            type=EVENT_TYPE_PEER_REVIEW,
+            status=STATUS_BOOKED,
+            start_time="2999-10-02T19:30:00.000Z",
+        )
+        db.get_user.return_value = User(
+            telegram_chat_id=100,
+            s21_login=None,
+            encrypted_password=None,
+        )
+        bot = AsyncMock()
+        scheduler = PeerReviewScheduler(
+            bot=bot,
+            db=db,
+            crypto=None,  # type: ignore
+            api=None,  # type: ignore
+        )
+
+        await scheduler.send_reminder(13, 15)
+
         bot.send_message.assert_not_awaited()
 
 

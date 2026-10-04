@@ -149,14 +149,13 @@ def _format_toggle_markup(
     """Booking format action for the T-15 reminder."""
     if event.id is None or event.status != STATUS_BOOKED:
         return None
-    is_online = bool(event.data.get("is_online"))
     lang = language if language in {"en", "ru", "uz"} else DEFAULT_LANGUAGE
     labels = {
-        "en": ("🌐 Switch to Online", "🏢 Switch to Offline"),
-        "ru": ("🌐 Переключить на Онлайн", "🏢 Переключить на Офлайн"),
-        "uz": ("🌐 Onlinega o‘tkazish", "🏢 Offlinega o‘tkazish"),
+        "en": "🌐 Switch to Online",
+        "ru": "🌐 Переключить на Онлайн",
+        "uz": "🌐 Onlinega o‘tkazish",
     }
-    text = labels[lang][1 if is_online else 0]
+    text = labels[lang]
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -236,6 +235,12 @@ class PeerReviewScheduler:
     async def poll_all_users(self) -> None:
         """Entry point for the interval poll job."""
         users = await self._db.get_all_users()
+        active_user_ids = {user.telegram_chat_id for user in users}
+        # Keep locks only for linked users. Never remove a locked instance:
+        # a forced refresh may still be finishing while /logout is processed.
+        for chat_id, lock in list(self._user_locks.items()):
+            if chat_id not in active_user_ids and not lock.locked():
+                self._user_locks.pop(chat_id, None)
         if not users:
             logger.debug("Poll skipped: no registered users")
             return
@@ -632,10 +637,12 @@ class PeerReviewScheduler:
                 is_online,
                 language=lang,
             )
-            if await self._notify_booking_once(
+            await self._notify_booking_once(
                 user_id, saved, text, language=lang
-            ):
-                self._schedule_reminders(saved)
+            )
+            # Instant-notification idempotency is independent from reminder
+            # restoration (e.g. after a process restart or reschedule).
+            self._schedule_reminders(saved)
             return
 
         # --- TRIGGER 1: already-booked peer review first seen --------------
@@ -666,10 +673,10 @@ class PeerReviewScheduler:
                 is_online,
                 language=lang,
             )
-            if await self._notify_booking_once(
+            await self._notify_booking_once(
                 user_id, saved, text, language=lang
-            ):
-                self._schedule_reminders(saved)
+            )
+            self._schedule_reminders(saved)
             return
 
         # --- refresh metadata for already-tracked active rows --------------
@@ -714,6 +721,12 @@ class PeerReviewScheduler:
                     if saved.status == STATUS_BOOKED and saved.id is not None:
                         self._remove_reminder_jobs(saved.id)
                         self._schedule_reminders(saved)
+                if (
+                    existing.status == STATUS_BOOKED
+                    and saved.status != STATUS_BOOKED
+                    and saved.id is not None
+                ):
+                    self._remove_reminder_jobs(saved.id)
             # APScheduler jobs are in-memory. Re-adding with stable ids restores
             # reminders after a process restart and is safe on every poll.
             if saved.status == STATUS_BOOKED:
@@ -811,16 +824,23 @@ class PeerReviewScheduler:
         if row is None:
             logger.info("Reminder skipped: event %s deleted", event_db_id)
             return
-        if row.status in REMINDER_BLOCK_STATUSES:
+        if row.status != STATUS_BOOKED or row.type != EVENT_TYPE_PEER_REVIEW:
             logger.info(
-                "Reminder skipped: event %s status=%s",
+                "Reminder skipped: event %s type=%s status=%s",
                 event_db_id,
+                row.type,
                 row.status,
             )
             return
 
         user = await self._db.get_user(row.user_id)
-        lang = (user.language if user else None) or DEFAULT_LANGUAGE
+        if user is None or not user.is_linked:
+            logger.info(
+                "Reminder skipped: user %s is no longer linked",
+                row.user_id,
+            )
+            return
+        lang = user.language or DEFAULT_LANGUAGE
         text = self._build_reminder_text(row, minutes_before, language=lang)
         await self._safe_send(
             row.user_id,

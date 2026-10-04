@@ -38,7 +38,7 @@ class TestTimeGrid(unittest.TestCase):
         """
         When mock time is 20:50:
         Hours 08..20 have no valid minutes left (since 20:45 is past, 21:00 is in 10 min < 15 min).
-        Hours 08..20 should be displayed as '.' with callback act='disabled'.
+        Hours 08..20 should be displayed as '•' with callback act='disabled'.
         Hour 21 has 21:15, 21:30, 21:45 valid (>= 15 min), so it shows '21'.
         """
         mock_now = datetime(2026, 10, 2, 20, 50, tzinfo=TASHKENT_TZ)
@@ -49,9 +49,8 @@ class TestTimeGrid(unittest.TestCase):
                 for btn in row:
                     buttons_by_text[btn.text] = btn.callback_data
 
-            # There should be '.' buttons with disabled callback
-            self.assertIn(".", buttons_by_text)
-            self.assertEqual(buttons_by_text["."], "sw:disabled:0")
+            self.assertIn("•", buttons_by_text)
+            self.assertEqual(buttons_by_text["•"], "sw:disabled:0")
 
             # Hour 21 and 22 should be available as normal digits
             self.assertIn("21", buttons_by_text)
@@ -62,7 +61,7 @@ class TestTimeGrid(unittest.TestCase):
         """
         At 18:16 on today:
         In hour 18:
-        - 00, 15, 30 are invalid (< 15 min from 18:16) -> '.'
+        - 00, 15, 30 are invalid (< 15 min from 18:16) -> '•'
         - 45 is valid (>= 15 min) -> '45'
         """
         mock_now = datetime(2026, 10, 2, 18, 16, tzinfo=TASHKENT_TZ)
@@ -71,11 +70,11 @@ class TestTimeGrid(unittest.TestCase):
             row = kb.inline_keyboard[0]
             # row has 4 buttons: 00, 15, 30, 45
             self.assertEqual(len(row), 4)
-            self.assertEqual(row[0].text, ".")
+            self.assertEqual(row[0].text, "•")
             self.assertEqual(row[0].callback_data, "sw:disabled:0")
-            self.assertEqual(row[1].text, ".")
+            self.assertEqual(row[1].text, "•")
             self.assertEqual(row[1].callback_data, "sw:disabled:0")
-            self.assertEqual(row[2].text, ".")
+            self.assertEqual(row[2].text, "•")
             self.assertEqual(row[2].callback_data, "sw:disabled:0")
             self.assertEqual(row[3].text, "45")
             self.assertEqual(row[3].callback_data, "sw:sm:45")
@@ -100,12 +99,11 @@ class TestTimeGrid(unittest.TestCase):
             for button in row
             if button.callback_data and button.callback_data.startswith("sw:")
         ]
-        self.assertEqual(hour_buttons[0].text, ".")
-        # 18:45 stays reachable so the FSM can show the explicit 30-min alert.
-        self.assertEqual(hour_buttons[18].text, "18")
+        self.assertEqual(hour_buttons[0].text, "•")
+        self.assertEqual(hour_buttons[18].text, "•")
         self.assertEqual(hour_buttons[19].text, "19")
 
-    def test_15_minute_end_stays_clickable_for_specific_alert(self):
+    def test_15_minute_end_is_disabled(self):
         kb = build_minute_picker_kb(
             which="em",
             day_offset=1,
@@ -114,13 +112,13 @@ class TestTimeGrid(unittest.TestCase):
             start_minute=30,
         )
         row = kb.inline_keyboard[0]
-        self.assertEqual(row[3].text, "45")
-        self.assertEqual(row[3].callback_data, "sw:em:45")
+        self.assertEqual(row[3].text, "•")
+        self.assertEqual(row[3].callback_data, "sw:disabled:0")
 
     def test_late_start_without_30_minute_end_is_disabled(self):
         kb = build_minute_picker_kb(which="sm", day_offset=1, hour=23)
         row = kb.inline_keyboard[0]
-        self.assertEqual([button.text for button in row], ["00", "15", ".", "."])
+        self.assertEqual([button.text for button in row], ["00", "15", "•", "•"])
 
     def test_final_guard_rejects_stale_callback(self):
         now = datetime(2026, 10, 2, 18, 0, tzinfo=timezone.utc)

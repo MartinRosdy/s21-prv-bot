@@ -160,11 +160,11 @@ def build_slots_list_kb(
 
     builder.row(
         InlineKeyboardButton(
-            text=f"🔍 ({evaluator_count})",
+            text=f"🔍 {evaluator_count}",
             callback_data="slot_cat:evaluator",
         ),
         InlineKeyboardButton(
-            text=f"📖 ({evaluated_count})",
+            text=f"📖 {evaluated_count}",
             callback_data="slot_cat:evaluated",
         ),
     )
@@ -184,14 +184,12 @@ def build_slots_list_kb(
         ) if slot.status == STATUS_BOOKED else ""
 
         if slot.effective_role == ROLE_EVALUATED:
-            peer = slot.data.get("peer_login") or "..."
-            label = f"📖 {when} · {peer} {fmt_str}"
+            label = f"📖 {when} {fmt_str}".rstrip()
         else:
             if slot.status == STATUS_OPEN:
-                label = f"🔍 {when} · ⏳ {fmt_str}"
+                label = f"🔍 {when} · ⏳ {fmt_str}".rstrip()
             else:
-                peer = slot.data.get("peer_login") or "..."
-                label = f"🔍 {when} · {peer} {fmt_str}"
+                label = f"🔍 {when} {fmt_str}".rstrip()
 
         builder.row(
             InlineKeyboardButton(
@@ -232,9 +230,6 @@ def build_slot_card_kb(
         )
         return builder.as_markup()
 
-    is_online = bool(slot.data.get("is_online"))
-    toggle_key = "make_offline" if is_online else "make_online"
-
     if slot.effective_role == ROLE_EVALUATOR:
         if slot.status == STATUS_OPEN:
             builder.row(
@@ -250,7 +245,7 @@ def build_slot_card_kb(
     if slot.status == STATUS_BOOKED:
         builder.row(
             InlineKeyboardButton(
-                text=_t(language, toggle_key),
+                text=_t(language, "make_online"),
                 callback_data=f"slot_toggle_online:{slot.id}",
             )
         )
@@ -372,15 +367,15 @@ def _duration_minutes(
     return (end_hour * 60 + end_minute) - (start_hour * 60 + start_minute)
 
 
-def _has_positive_end_in_hour(
+def _has_valid_end_in_hour(
     end_hour: int,
     start_hour: int,
     start_minute: int,
 ) -> bool:
-    """Whether an end-hour has a positive endpoint to present to the user."""
+    """Whether an end-hour contains at least one valid 30-minute endpoint."""
     return any(
         _duration_minutes(start_hour, start_minute, end_hour, minute)
-        > 0
+        >= MIN_SLOT_DURATION_MINUTES
         for minute in (0, 15, 30, 45)
     )
 
@@ -399,7 +394,7 @@ def build_hour_picker_kb(
 
     Time guards:
     For today (day_offset == 0), if all 4 minutes of an hour fail the 15-min rule
-    (or for end hour, are not after start_time), the cell is replaced by '.'.
+    (or for end hour, cannot reach 30 minutes), the cell is replaced by '•'.
     Start values also need room for the 30-minute minimum duration.
     """
     builder = InlineKeyboardBuilder()
@@ -418,9 +413,7 @@ def build_hour_picker_kb(
                 for m in (0, 15, 30, 45)
             )
         elif which == "eh" and start_hour is not None:
-            # Keep an hour with a 15-minute endpoint selectable. The minute
-            # callback then explains the 30-minute minimum with an alert.
-            is_valid = _has_positive_end_in_hour(
+            is_valid = _has_valid_end_in_hour(
                 hour,
                 start_hour,
                 start_minute or 0,
@@ -433,7 +426,7 @@ def build_hour_picker_kb(
             )
             cb = SlotWizardCB(act=which, val=hour).pack()
         else:
-            label = "."
+            label = "•"
             cb = SlotWizardCB(act="disabled", val=0).pack()
 
         buttons.append(InlineKeyboardButton(text=label, callback_data=cb))
@@ -459,8 +452,7 @@ def build_minute_picker_kb(
 
     Time guards:
     For today (day_offset == 0), minutes that fail the 15-min rule (or end minutes <= start)
-    are replaced by '.'. Positive 15-minute end values reach the FSM so it can
-    show the user the explicit minimum-duration alert.
+    are replaced by '•'. End values shorter than 30 minutes are disabled too.
     """
     builder = InlineKeyboardBuilder()
     now_local = utc_now().astimezone(TASHKENT_TZ)
@@ -481,15 +473,13 @@ def build_minute_picker_kb(
             ):
                 is_valid = False
         elif which == "em" and start_hour is not None:
-            # A 15-minute endpoint stays clickable: the FSM returns a clear
-            # alert and keeps the user on this step. Non-positive values are
-            # always disabled.
+            # End values shorter than 30 minutes are rendered as bullets.
             if _duration_minutes(
                 start_hour,
                 start_minute or 0,
                 hour,
                 minute,
-            ) <= 0:
+            ) < MIN_SLOT_DURATION_MINUTES:
                 is_valid = False
 
         if is_valid:
@@ -499,7 +489,7 @@ def build_minute_picker_kb(
             )
             cb = SlotWizardCB(act=which, val=minute).pack()
         else:
-            label = "."
+            label = "•"
             cb = SlotWizardCB(act="disabled", val=0).pack()
 
         buttons.append(InlineKeyboardButton(text=label, callback_data=cb))

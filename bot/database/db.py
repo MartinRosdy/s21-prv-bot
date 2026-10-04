@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 import aiosqlite
 
@@ -72,6 +74,7 @@ class Database:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._conn: Optional[aiosqlite.Connection] = None
+        self._write_lock = asyncio.Lock()
 
     @property
     def connection(self) -> aiosqlite.Connection:
@@ -81,6 +84,8 @@ class Database:
 
     async def connect(self) -> None:
         """Open the connection and ensure schema exists."""
+        if self._conn is not None:
+            return
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._db_path)
         try:
@@ -104,8 +109,8 @@ class Database:
     async def _migrate_schema(self) -> None:
         """Add columns / relax constraints introduced after the initial schema."""
         assert self._conn is not None
-        cursor = await self._conn.execute("PRAGMA table_info(events)")
-        event_columns = {row[1] for row in await cursor.fetchall()}
+        async with self._conn.execute("PRAGMA table_info(events)") as cursor:
+            event_columns = {row[1] for row in await cursor.fetchall()}
         if "end_time" not in event_columns:
             await self._conn.execute(
                 "ALTER TABLE events ADD COLUMN end_time TEXT"
@@ -128,16 +133,16 @@ class Database:
             )
             logger.info("Migrated events table: added notified_booking_id column")
 
-        cursor = await self._conn.execute("PRAGMA table_info(users)")
-        user_info = await cursor.fetchall()
+        async with self._conn.execute("PRAGMA table_info(users)") as cursor:
+            user_info = await cursor.fetchall()
         user_columns = {row[1] for row in user_info}
         if "language" not in user_columns:
             await self._conn.execute(
                 "ALTER TABLE users ADD COLUMN language TEXT NOT NULL DEFAULT 'ru'"
             )
             logger.info("Migrated users table: added language column")
-            cursor = await self._conn.execute("PRAGMA table_info(users)")
-            user_info = await cursor.fetchall()
+            async with self._conn.execute("PRAGMA table_info(users)") as cursor:
+                user_info = await cursor.fetchall()
 
         # Allow NULL credentials so /logout can keep language preference.
         # SQLite cannot ALTER NOT NULL → NULL; rebuild the table when needed.
@@ -188,6 +193,32 @@ class Database:
             self._conn = None
             logger.info("SQLite connection closed")
 
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Serialize writes and commit or roll back them as one unit."""
+        async with self._write_lock:
+            connection = self.connection
+            try:
+                yield connection
+            except BaseException:
+                await connection.rollback()
+                raise
+            else:
+                await connection.commit()
+
+    @staticmethod
+    async def _execute_write(
+        connection: aiosqlite.Connection,
+        query: str,
+        parameters: tuple[Any, ...] = (),
+    ) -> int:
+        """Execute a write, close its cursor, and return affected row count."""
+        cursor = await connection.execute(query, parameters)
+        try:
+            return cursor.rowcount
+        finally:
+            await cursor.close()
+
     # ------------------------------------------------------------------ users
 
     async def upsert_user(
@@ -202,28 +233,29 @@ class Database:
         New rows get ``language='ru'`` by default. On conflict only login /
         password are updated — language preference is preserved.
         """
-        await self.connection.execute(
-            """
-            INSERT INTO users (
-                telegram_chat_id, s21_login, encrypted_password, language
+        async with self.transaction() as connection:
+            await self._execute_write(
+                connection,
+                """
+                INSERT INTO users (
+                    telegram_chat_id, s21_login, encrypted_password, language
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(telegram_chat_id) DO UPDATE SET
+                    s21_login = excluded.s21_login,
+                    encrypted_password = excluded.encrypted_password,
+                    updated_at = datetime('now')
+                """,
+                (
+                    telegram_chat_id,
+                    s21_login,
+                    encrypted_password,
+                    DEFAULT_LANGUAGE,
+                ),
             )
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(telegram_chat_id) DO UPDATE SET
-                s21_login = excluded.s21_login,
-                encrypted_password = excluded.encrypted_password,
-                updated_at = datetime('now')
-            """,
-            (
-                telegram_chat_id,
-                s21_login,
-                encrypted_password,
-                DEFAULT_LANGUAGE,
-            ),
-        )
-        await self.connection.commit()
 
     async def get_user(self, telegram_chat_id: int) -> Optional[User]:
-        cursor = await self.connection.execute(
+        async with self.connection.execute(
             """
             SELECT telegram_chat_id, s21_login, encrypted_password,
                    language, created_at, updated_at
@@ -231,13 +263,13 @@ class Database:
             WHERE telegram_chat_id = ?
             """,
             (telegram_chat_id,),
-        )
-        row = await cursor.fetchone()
+        ) as cursor:
+            row = await cursor.fetchone()
         return self._row_to_user(row) if row else None
 
     async def get_all_users(self) -> list[User]:
         """Return only users with active School 21 credentials (for polling)."""
-        cursor = await self.connection.execute(
+        async with self.connection.execute(
             """
             SELECT telegram_chat_id, s21_login, encrypted_password,
                    language, created_at, updated_at
@@ -247,8 +279,8 @@ class Database:
               AND encrypted_password IS NOT NULL
               AND encrypted_password != ''
             """
-        )
-        rows = await cursor.fetchall()
+        ) as cursor:
+            rows = await cursor.fetchall()
         return [self._row_to_user(r) for r in rows]
 
     async def update_user_language(
@@ -257,15 +289,16 @@ class Database:
         language: str,
     ) -> None:
         """Persist the user's UI language preference."""
-        await self.connection.execute(
-            """
-            UPDATE users
-            SET language = ?, updated_at = datetime('now')
-            WHERE telegram_chat_id = ?
-            """,
-            (language, telegram_chat_id),
-        )
-        await self.connection.commit()
+        async with self.transaction() as connection:
+            await self._execute_write(
+                connection,
+                """
+                UPDATE users
+                SET language = ?, updated_at = datetime('now')
+                WHERE telegram_chat_id = ?
+                """,
+                (language, telegram_chat_id),
+            )
 
     async def upsert_user_language(
         self,
@@ -277,19 +310,20 @@ class Database:
 
         Creates a soft row (NULL credentials) for first-time /start guests.
         """
-        await self.connection.execute(
-            """
-            INSERT INTO users (
-                telegram_chat_id, s21_login, encrypted_password, language
+        async with self.transaction() as connection:
+            await self._execute_write(
+                connection,
+                """
+                INSERT INTO users (
+                    telegram_chat_id, s21_login, encrypted_password, language
+                )
+                VALUES (?, NULL, NULL, ?)
+                ON CONFLICT(telegram_chat_id) DO UPDATE SET
+                    language = excluded.language,
+                    updated_at = datetime('now')
+                """,
+                (telegram_chat_id, language),
             )
-            VALUES (?, NULL, NULL, ?)
-            ON CONFLICT(telegram_chat_id) DO UPDATE SET
-                language = excluded.language,
-                updated_at = datetime('now')
-            """,
-            (telegram_chat_id, language),
-        )
-        await self.connection.commit()
 
     async def clear_user_credentials(self, telegram_chat_id: int) -> bool:
         """
@@ -302,31 +336,34 @@ class Database:
         if user is None or not user.is_linked:
             return False
 
-        await self.connection.execute(
-            "DELETE FROM events WHERE user_id = ?",
-            (telegram_chat_id,),
-        )
-        cursor = await self.connection.execute(
-            """
-            UPDATE users
-            SET s21_login = NULL,
-                encrypted_password = NULL,
-                updated_at = datetime('now')
-            WHERE telegram_chat_id = ?
-            """,
-            (telegram_chat_id,),
-        )
-        await self.connection.commit()
-        return cursor.rowcount > 0
+        async with self.transaction() as connection:
+            await self._execute_write(
+                connection,
+                "DELETE FROM events WHERE user_id = ?",
+                (telegram_chat_id,),
+            )
+            changed = await self._execute_write(
+                connection,
+                """
+                UPDATE users
+                SET s21_login = NULL,
+                    encrypted_password = NULL,
+                    updated_at = datetime('now')
+                WHERE telegram_chat_id = ?
+                """,
+                (telegram_chat_id,),
+            )
+        return changed > 0
 
     async def delete_user(self, telegram_chat_id: int) -> bool:
         """Hard-delete user row (cascade events). Prefer clear_user_credentials."""
-        cursor = await self.connection.execute(
-            "DELETE FROM users WHERE telegram_chat_id = ?",
-            (telegram_chat_id,),
-        )
-        await self.connection.commit()
-        return cursor.rowcount > 0
+        async with self.transaction() as connection:
+            changed = await self._execute_write(
+                connection,
+                "DELETE FROM users WHERE telegram_chat_id = ?",
+                (telegram_chat_id,),
+            )
+        return changed > 0
 
     # ------------------------------------------------------------------ events
 
@@ -338,24 +375,23 @@ class Database:
     ) -> list[TrackedEvent]:
         """Return all (or only non-terminal) events for a user."""
         if active_only:
-            cursor = await self.connection.execute(
+            query = (
                 f"""
                 SELECT {_EVENT_COLUMNS}
                 FROM events
                 WHERE user_id = ? AND status IN ('OPEN', 'BOOKED')
-                """,
-                (user_id,),
+                """
             )
         else:
-            cursor = await self.connection.execute(
+            query = (
                 f"""
                 SELECT {_EVENT_COLUMNS}
                 FROM events
                 WHERE user_id = ?
-                """,
-                (user_id,),
+                """
             )
-        rows = await cursor.fetchall()
+        async with self.connection.execute(query, (user_id,)) as cursor:
+            rows = await cursor.fetchall()
         return [self._row_to_event(r) for r in rows]
 
     async def get_active_slot_counts(self, user_id: int) -> tuple[int, int]:
@@ -374,15 +410,15 @@ class Database:
 
     async def get_event_by_id(self, event_id: int) -> Optional[TrackedEvent]:
         """Fetch a single row by primary key (used by reminder jobs)."""
-        cursor = await self.connection.execute(
+        async with self.connection.execute(
             f"""
             SELECT {_EVENT_COLUMNS}
             FROM events
             WHERE id = ?
             """,
             (event_id,),
-        )
-        row = await cursor.fetchone()
+        ) as cursor:
+            row = await cursor.fetchone()
         return self._row_to_event(row) if row else None
 
     async def get_event_by_s21_id(
@@ -390,15 +426,15 @@ class Database:
         user_id: int,
         s21_event_id: str,
     ) -> Optional[TrackedEvent]:
-        cursor = await self.connection.execute(
+        async with self.connection.execute(
             f"""
             SELECT {_EVENT_COLUMNS}
             FROM events
             WHERE user_id = ? AND s21_event_id = ?
             """,
             (user_id, s21_event_id),
-        )
-        row = await cursor.fetchone()
+        ) as cursor:
+            row = await cursor.fetchone()
         return self._row_to_event(row) if row else None
 
     async def upsert_event(self, event: TrackedEvent) -> TrackedEvent:
@@ -409,41 +445,59 @@ class Database:
         """
         data_json = json.dumps(event.data or {}, ensure_ascii=False)
         role = event.role or (event.data or {}).get("role")
-        await self.connection.execute(
-            """
-            INSERT INTO events (
-                user_id, s21_event_id, type, status, start_time, end_time,
-                role, is_notified, notified_booking_id, data
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, s21_event_id) DO UPDATE SET
-                type = excluded.type,
-                status = excluded.status,
-                start_time = excluded.start_time,
-                end_time = excluded.end_time,
-                role = excluded.role,
-                is_notified = MAX(events.is_notified, excluded.is_notified),
-                notified_booking_id = COALESCE(
-                    events.notified_booking_id,
-                    excluded.notified_booking_id
+        async with self.transaction() as connection:
+            async with connection.execute(
+                """
+                SELECT 1
+                FROM users
+                WHERE telegram_chat_id = ?
+                  AND s21_login IS NOT NULL
+                  AND s21_login != ''
+                  AND encrypted_password IS NOT NULL
+                  AND encrypted_password != ''
+                """,
+                (event.user_id,),
+            ) as cursor:
+                linked = await cursor.fetchone()
+            if linked is None:
+                raise RuntimeError(
+                    f"Cannot store event for unlinked user {event.user_id}"
+                )
+            await self._execute_write(
+                connection,
+                """
+                INSERT INTO events (
+                    user_id, s21_event_id, type, status, start_time, end_time,
+                    role, is_notified, notified_booking_id, data
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, s21_event_id) DO UPDATE SET
+                    type = excluded.type,
+                    status = excluded.status,
+                    start_time = excluded.start_time,
+                    end_time = excluded.end_time,
+                    role = excluded.role,
+                    is_notified = MAX(events.is_notified, excluded.is_notified),
+                    notified_booking_id = COALESCE(
+                        events.notified_booking_id,
+                        excluded.notified_booking_id
+                    ),
+                    data = excluded.data,
+                    updated_at = datetime('now')
+                """,
+                (
+                    event.user_id,
+                    event.s21_event_id,
+                    event.type,
+                    event.status,
+                    event.start_time,
+                    event.end_time,
+                    role,
+                    int(event.is_notified),
+                    event.notified_booking_id,
+                    data_json,
                 ),
-                data = excluded.data,
-                updated_at = datetime('now')
-            """,
-            (
-                event.user_id,
-                event.s21_event_id,
-                event.type,
-                event.status,
-                event.start_time,
-                event.end_time,
-                role,
-                int(event.is_notified),
-                event.notified_booking_id,
-                data_json,
-            ),
-        )
-        await self.connection.commit()
+            )
 
         saved = await self.get_event_by_s21_id(event.user_id, event.s21_event_id)
         if saved is None:
@@ -459,23 +513,24 @@ class Database:
         booking_id: str,
     ) -> bool:
         """Atomically reserve one notification for a specific booking."""
-        cursor = await self.connection.execute(
-            """
-            UPDATE events
-            SET is_notified = 1,
-                notified_booking_id = ?,
-                updated_at = datetime('now')
-            WHERE id = ?
-              AND (
-                  is_notified = 0
-                  OR notified_booking_id IS NULL
-                  OR notified_booking_id != ?
-              )
-            """,
-            (booking_id, event_id, booking_id),
-        )
-        await self.connection.commit()
-        return cursor.rowcount == 1
+        async with self.transaction() as connection:
+            changed = await self._execute_write(
+                connection,
+                """
+                UPDATE events
+                SET is_notified = 1,
+                    notified_booking_id = ?,
+                    updated_at = datetime('now')
+                WHERE id = ?
+                  AND (
+                      is_notified = 0
+                      OR notified_booking_id IS NULL
+                      OR notified_booking_id != ?
+                  )
+                """,
+                (booking_id, event_id, booking_id),
+            )
+        return changed == 1
 
     async def update_event_status(
         self,
@@ -488,39 +543,40 @@ class Database:
         end_time: Optional[str] = None,
     ) -> None:
         """Patch status (and optionally data / type / start/end time)."""
-        current = await self.get_event_by_id(event_id)
-        if current is None:
-            return
-
-        new_data = data if data is not None else current.data
-        new_type = event_type if event_type is not None else current.type
-        new_start = start_time if start_time is not None else current.start_time
-        new_end = end_time if end_time is not None else current.end_time
-
-        await self.connection.execute(
-            """
-            UPDATE events
-            SET status = ?, type = ?, start_time = ?, end_time = ?, data = ?,
-                updated_at = datetime('now')
-            WHERE id = ?
-            """,
-            (
-                status,
-                new_type,
-                new_start,
-                new_end,
-                json.dumps(new_data or {}, ensure_ascii=False),
-                event_id,
-            ),
-        )
-        await self.connection.commit()
+        async with self.transaction() as connection:
+            await self._execute_write(
+                connection,
+                """
+                UPDATE events
+                SET status = ?,
+                    type = COALESCE(?, type),
+                    start_time = COALESCE(?, start_time),
+                    end_time = COALESCE(?, end_time),
+                    data = COALESCE(?, data),
+                    updated_at = datetime('now')
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    event_type,
+                    start_time,
+                    end_time,
+                    (
+                        json.dumps(data, ensure_ascii=False)
+                        if data is not None
+                        else None
+                    ),
+                    event_id,
+                ),
+            )
 
     async def delete_event(self, event_id: int) -> None:
-        await self.connection.execute(
-            "DELETE FROM events WHERE id = ?",
-            (event_id,),
-        )
-        await self.connection.commit()
+        async with self.transaction() as connection:
+            await self._execute_write(
+                connection,
+                "DELETE FROM events WHERE id = ?",
+                (event_id,),
+            )
 
     # -------------------------------------------------------------- converters
 

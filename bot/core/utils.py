@@ -165,3 +165,8 @@ def escape_md(text: str) -> str:
         .replace("`", "\\`")
         .replace("[", "\\[")
     )
+
+
+def escape_md_code(text: str) -> str:
+    """Escape text embedded in Telegram classic-Markdown inline code."""
+    return text.replace("\\", "\\\\").replace("`", "\\`")

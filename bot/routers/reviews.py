@@ -11,7 +11,15 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot.core.utils import TASHKENT_TZ, escape_md, format_datetime, to_tashkent, utc_iso, utc_now
+from bot.core.utils import (
+    TASHKENT_TZ,
+    escape_md,
+    escape_md_code,
+    format_datetime,
+    to_tashkent,
+    utc_iso,
+    utc_now,
+)
 from bot.database.db import Database
 from bot.database.models import (
     DEFAULT_LANGUAGE,
@@ -61,7 +69,7 @@ SLOT_TYPES = frozenset({EVENT_TYPE_SLOT, EVENT_TYPE_PEER_REVIEW})
 
 _TEXTS = {
     LANG_EN: {
-        "no_slots": "No active slots",
+        "no_slots": "📭 You have no planned reviews or open slots yet. It is a great time to create one!",
         "your_slots": "Your peer-review slots:",
         "create_title": "➕ *Create slot*",
         "edit_title": "🔄 *Change slot time*",
@@ -82,9 +90,9 @@ _TEXTS = {
         "status_open": "Status: ⏳ *OPEN* (waiting for peer)",
         "status_booked": "Status: 🔥 *BOOKED*",
         "peer_none": "Booked: —",
-        "peer_line": "Booked: *{peer}* ({fmt})",
-        "peer_evaluatee": "Evaluatee: *{peer}* ({fmt})",
-        "peer_evaluator": "Evaluator: *{peer}* ({fmt})",
+        "peer_line": "Booked: {peer} ({fmt})",
+        "peer_evaluatee": "Evaluatee: {peer} ({fmt})",
+        "peer_evaluator": "Evaluator: {peer} ({fmt})",
         "peer_unknown": "unknown peer",
         "role_evaluator": "Role: 🔍 *Checking*",
         "role_evaluated": "Role: 📖 *Being checked*",
@@ -119,7 +127,7 @@ _TEXTS = {
         "category_evaluated": "Being checked",
     },
     LANG_RU: {
-        "no_slots": "Нет активных слотов",
+        "no_slots": "📭 У вас пока нет запланированных проверок и свободных слотов. Самое время это исправить!",
         "your_slots": "Твои слоты на пир-ревью:",
         "create_title": "➕ *Создание слота*",
         "edit_title": "🔄 *Изменение времени слота*",
@@ -140,9 +148,9 @@ _TEXTS = {
         "status_open": "Статус: ⏳ *OPEN* (ждём пира)",
         "status_booked": "Статус: 🔥 *BOOKED*",
         "peer_none": "Записан: —",
-        "peer_line": "Записан: *{peer}* ({fmt})",
-        "peer_evaluatee": "Проверяемый: *{peer}* ({fmt})",
-        "peer_evaluator": "Проверяющий: *{peer}* ({fmt})",
+        "peer_line": "Записан: {peer} ({fmt})",
+        "peer_evaluatee": "Проверяемый: {peer} ({fmt})",
+        "peer_evaluator": "Проверяющий: {peer} ({fmt})",
         "peer_unknown": "неизвестный пир",
         "role_evaluator": "Роль: 🔍 *Проверяющий*",
         "role_evaluated": "Роль: 📖 *Проверяемый*",
@@ -177,7 +185,7 @@ _TEXTS = {
         "category_evaluated": "Меня проверяют",
     },
     LANG_UZ: {
-        "no_slots": "Faol slotlar yo‘q",
+        "no_slots": "📭 Hozircha rejalashtirilgan tekshiruvlar yoki bo‘sh slotlar yo‘q. Birinchi slotni yarating!",
         "your_slots": "Peer-review slotlaringiz:",
         "create_title": "➕ *Slot yaratish*",
         "edit_title": "🔄 *Slot vaqtini o‘zgartirish*",
@@ -198,9 +206,9 @@ _TEXTS = {
         "status_open": "Holat: ⏳ *OPEN* (peer kutilmoqda)",
         "status_booked": "Holat: 🔥 *BOOKED*",
         "peer_none": "Yozilgan: —",
-        "peer_line": "Yozilgan: *{peer}* ({fmt})",
-        "peer_evaluatee": "Tekshiriluvchi: *{peer}* ({fmt})",
-        "peer_evaluator": "Tekshiruvchi: *{peer}* ({fmt})",
+        "peer_line": "Yozilgan: {peer} ({fmt})",
+        "peer_evaluatee": "Tekshiriluvchi: {peer} ({fmt})",
+        "peer_evaluator": "Tekshiruvchi: {peer} ({fmt})",
         "peer_unknown": "noma’lum peer",
         "role_evaluator": "Rol: 🔍 *Tekshiruvchi*",
         "role_evaluated": "Rol: 📖 *Tekshiriluvchi*",
@@ -297,9 +305,10 @@ def _slot_card_text(slot: TrackedEvent, language: str | None = None) -> str:
         status_line = _tr(lang, "status_open")
         peer_line = _tr(lang, "peer_none")
     else:
-        peer = escape_md(
+        peer = escape_md_code(
             str(slot.data.get("peer_login") or _tr(lang, "peer_unknown"))
         )
+        peer = f"`{peer}`"
         status_line = _tr(lang, "status_booked")
         peer_key = (
             "peer_evaluator" if role == ROLE_EVALUATED else "peer_evaluatee"
@@ -671,7 +680,7 @@ def get_reviews_router(
                 selected_date=date.fromisoformat(str(data["selected_date"])),
             )
         except SlotDurationError:
-            await callback.answer(_tr(lang, "min_duration"), show_alert=True)
+            await callback.answer(_tr(lang, "min_duration"), show_alert=False)
             return
         except (KeyError, ValueError):
             await callback.answer(
@@ -1011,7 +1020,7 @@ def get_reviews_router(
             await callback.answer(_tr(lang, "booked_only"), show_alert=True)
             return
         await callback.answer(
-            "Смена формата пока доступна только через платформу Школы 21",
+            "Смена формата на онлайн пока в разработке",
             show_alert=True,
         )
 
@@ -1118,7 +1127,7 @@ def get_reviews_router(
             if duration < MIN_SLOT_DURATION_MINUTES:
                 await callback.answer(
                     _tr(lang, "min_duration"),
-                    show_alert=True,
+                    show_alert=False,
                 )
                 return
             await state.update_data(end_minute=callback_data.val)
