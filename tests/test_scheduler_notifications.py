@@ -1,6 +1,7 @@
 """Tests for scheduler notification text generation (4 triggers, both roles)."""
 
 import unittest
+from unittest.mock import AsyncMock
 from bot.database.models import (
     EVENT_TYPE_PEER_REVIEW,
     ROLE_EVALUATED,
@@ -107,6 +108,54 @@ class TestSchedulerNotifications(unittest.TestCase):
         t0_text = scheduler._build_reminder_text(ev, minutes_before=0, language="ru")
         self.assertIn("Пир-Ревью начинается прямо сейчас!", t0_text)
         self.assertIn("<code>student1</code>", t0_text)
+
+
+class TestBookingNotificationGuard(unittest.IsolatedAsyncioTestCase):
+    async def test_future_booking_is_claimed_only_once(self):
+        db = AsyncMock()
+        db.claim_event_notification = AsyncMock(side_effect=[True, False])
+        bot = AsyncMock()
+        scheduler = PeerReviewScheduler(
+            bot=bot,
+            db=db,
+            crypto=None,  # type: ignore
+            api=None,  # type: ignore
+        )
+        event = TrackedEvent(
+            id=10,
+            user_id=100,
+            s21_event_id="future",
+            type=EVENT_TYPE_PEER_REVIEW,
+            status=STATUS_BOOKED,
+            start_time="2999-10-02T19:30:00.000Z",
+        )
+
+        self.assertTrue(await scheduler._notify_booking_once(100, event, "new"))
+        self.assertFalse(await scheduler._notify_booking_once(100, event, "new"))
+        bot.send_message.assert_awaited_once()
+        db.claim_event_notification.assert_any_await(10, "future")
+
+    async def test_past_booking_is_completed_without_notification(self):
+        db = AsyncMock()
+        bot = AsyncMock()
+        scheduler = PeerReviewScheduler(
+            bot=bot,
+            db=db,
+            crypto=None,  # type: ignore
+            api=None,  # type: ignore
+        )
+        event = TrackedEvent(
+            id=11,
+            user_id=100,
+            s21_event_id="past",
+            type=EVENT_TYPE_PEER_REVIEW,
+            status=STATUS_BOOKED,
+            start_time="2020-10-02T19:30:00.000Z",
+        )
+
+        self.assertFalse(await scheduler._notify_booking_once(100, event, "old"))
+        db.update_event_status.assert_awaited_once_with(11, "COMPLETED")
+        bot.send_message.assert_not_awaited()
 
 
 if __name__ == "__main__":

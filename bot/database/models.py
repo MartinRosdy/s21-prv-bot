@@ -82,6 +82,8 @@ class TrackedEvent:
     end_time: Optional[str] = None
     data: dict[str, Any] = field(default_factory=dict)
     role: Optional[str] = None
+    is_notified: bool = False
+    notified_booking_id: Optional[str] = None
 
     @property
     def effective_role(self) -> str:

@@ -78,7 +78,7 @@ _LABELS = {
         "category_evaluated": "📖 Being checked",
         "time_unavailable": "Time unavailable",
         "status_free": "⏳ Free",
-        "all_categories": "📋 All slots",
+        "free_slots": "📋 Free slots",
     },
     LANG_RU: {
         "create_slot": "➕ Создать слот",
@@ -98,7 +98,7 @@ _LABELS = {
         "category_evaluated": "📖 Меня проверяют",
         "time_unavailable": "Время недоступно",
         "status_free": "⏳ Свободен",
-        "all_categories": "📋 Все слоты",
+        "free_slots": "📋 Свободные слоты",
     },
     LANG_UZ: {
         "create_slot": "➕ Slot yaratish",
@@ -118,7 +118,7 @@ _LABELS = {
         "category_evaluated": "📖 Meni tekshirishadi",
         "time_unavailable": "Vaqt mavjud emas",
         "status_free": "⏳ Bo‘sh",
-        "all_categories": "📋 Barcha slotlar",
+        "free_slots": "📋 Bo‘sh slotlar",
     },
 }
 
@@ -164,6 +164,7 @@ def build_slots_list_kb(
 
     evaluator_slots = [s for s in slots if s.effective_role == ROLE_EVALUATOR]
     evaluated_slots = [s for s in slots if s.effective_role == ROLE_EVALUATED]
+    free_slots = [s for s in evaluator_slots if s.status == STATUS_OPEN]
 
     # Category switcher buttons at the top
     evaluator_count = len(evaluator_slots)
@@ -171,16 +172,20 @@ def build_slots_list_kb(
 
     builder.row(
         InlineKeyboardButton(
-            text=f"🔍 ({evaluator_count})",
+            text=f"{_t(lang, 'category_evaluator')} ({evaluator_count})",
             callback_data="slot_cat:evaluator",
-        ),
+        )
+    )
+    builder.row(
         InlineKeyboardButton(
-            text=f"📖 ({evaluated_count})",
+            text=f"{_t(lang, 'category_evaluated')} ({evaluated_count})",
             callback_data="slot_cat:evaluated",
-        ),
+        )
+    )
+    builder.row(
         InlineKeyboardButton(
-            text=f"📋 ({len(slots)})",
-            callback_data="slot_cat:all",
+            text=f"{_t(lang, 'free_slots')} ({len(free_slots)})",
+            callback_data="slot_cat:open",
         ),
     )
 
@@ -190,6 +195,8 @@ def build_slots_list_kb(
         slots_to_render = evaluator_slots
     elif category_filter == "evaluated":
         slots_to_render = evaluated_slots
+    elif category_filter == "open":
+        slots_to_render = free_slots
 
     for slot in slots_to_render:
         if slot.id is None:
@@ -250,7 +257,8 @@ def build_slot_card_kb(
     is_online = bool(slot.data.get("is_online"))
     toggle_key = "make_offline" if is_online else "make_online"
 
-    # Evaluator can edit time, delete, or toggle online/offline
+    # The existing platform mutation changes open evaluator slots. Do not
+    # pretend that a booked/evaluated review was changed only in local state.
     if slot.effective_role == ROLE_EVALUATOR:
         if slot.status == STATUS_OPEN:
             builder.row(
@@ -263,14 +271,6 @@ def build_slot_card_kb(
                     callback_data=f"slot_edit:{slot.id}",
                 ),
             )
-        builder.row(
-            InlineKeyboardButton(
-                text=_t(language, toggle_key),
-                callback_data=f"slot_toggle_online:{slot.id}",
-            )
-        )
-    else:
-        # Evaluated user can also toggle format if needed
         builder.row(
             InlineKeyboardButton(
                 text=_t(language, toggle_key),
@@ -409,24 +409,18 @@ def build_hour_picker_kb(
     for hour in range(8, 24):
         is_valid = True
 
-        if day_offset == 0:
-            if which == "sh":
+        if which == "sh" and day_offset == 0:
                 # Start hour is valid if at least one minute (:00, :15, :30, :45) is valid
-                has_any_valid_minute = any(
-                    _is_slot_time_valid_today(hour, m, now_local)
-                    for m in (0, 15, 30, 45)
-                )
-                if not has_any_valid_minute:
-                    is_valid = False
-            elif which == "eh":
-                # End hour is valid if there are minutes after start_hour:start_minute
-                if start_hour is not None:
-                    if hour < start_hour:
-                        is_valid = False
-                    elif hour == start_hour:
-                        sm = start_minute or 0
-                        if sm >= 45:
-                            is_valid = False
+            is_valid = any(
+                _is_slot_time_valid_today(hour, m, now_local)
+                for m in (0, 15, 30, 45)
+            )
+        elif which == "eh" and start_hour is not None:
+            # End must be later than start for every selected date, not only today.
+            if hour < start_hour:
+                is_valid = False
+            elif hour == start_hour and (start_minute or 0) >= 45:
+                is_valid = False
 
         if is_valid:
             label = _mark_current(
@@ -470,15 +464,19 @@ def build_minute_picker_kb(
     for minute in (0, 15, 30, 45):
         is_valid = True
 
-        if day_offset == 0:
-            if which == "sm":
-                if not _is_slot_time_valid_today(hour, minute, now_local):
-                    is_valid = False
-            elif which == "em":
-                if start_hour is not None and hour == start_hour:
-                    sm = start_minute or 0
-                    if minute <= sm:
-                        is_valid = False
+        if which == "sm":
+            if day_offset == 0 and not _is_slot_time_valid_today(
+                hour, minute, now_local
+            ):
+                is_valid = False
+            # The wizard creates same-day slots; 23:45 has no valid end value.
+            if hour == 23 and minute == 45:
+                is_valid = False
+        elif which == "em" and start_hour is not None:
+            if hour < start_hour:
+                is_valid = False
+            elif hour == start_hour and minute <= (start_minute or 0):
+                is_valid = False
 
         if is_valid:
             label = _mark_current(
@@ -558,6 +556,12 @@ def compose_slot_datetimes(
     end_minute: int,
 ) -> tuple[datetime, datetime]:
     """Build timezone-aware UTC datetimes from wizard selections (Tashkent local)."""
+    if day_offset not in range(0, 7):
+        raise ValueError("day_offset must be between 0 and 6")
+    if start_hour not in range(8, 24) or end_hour not in range(8, 24):
+        raise ValueError("slot hours must be between 08 and 23")
+    if start_minute not in {0, 15, 30, 45} or end_minute not in {0, 15, 30, 45}:
+        raise ValueError("slot minutes must use the 15-minute grid")
     base = (utc_now().astimezone(TASHKENT_TZ) + timedelta(days=day_offset)).date()
     local_start = datetime(
         base.year,
@@ -576,6 +580,21 @@ def compose_slot_datetimes(
         tzinfo=TASHKENT_TZ,
     )
     if local_end <= local_start:
-        local_end = local_end + timedelta(days=1)
+        raise ValueError("slot end must be later than slot start")
     utc = timezone.utc
     return local_start.astimezone(utc), local_end.astimezone(utc)
+
+
+def is_slot_start_allowed(
+    start: datetime,
+    *,
+    now: Optional[datetime] = None,
+    lead_minutes: int = MIN_BOOKING_LEAD_MINUTES,
+) -> bool:
+    """Server-side guard against stale or forged wizard callbacks."""
+    current = now or utc_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return start >= current.astimezone(timezone.utc) + timedelta(
+        minutes=lead_minutes
+    )

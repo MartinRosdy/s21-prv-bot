@@ -44,18 +44,13 @@ async def set_bot_commands(bot: Bot) -> None:
     do not send language_code still see Russian descriptions. Per-user
     sync happens on /lang and /login via BotCommandScopeChat.
     """
-    ru_commands = bot_commands_for("ru")
-    await bot.set_my_commands(ru_commands)
-    await bot.set_my_commands(ru_commands, language_code="ru")
-    for lang_code, lang in (("en", "en"), ("uz", "uz")):
+    for lang_code, lang in ((None, "ru"), ("ru", "ru"), ("en", "en"), ("uz", "uz")):
         try:
-            await bot.set_my_commands(
-                bot_commands_for(lang),
-                language_code=lang_code,
-            )
+            kwargs = {"language_code": lang_code} if lang_code else {}
+            await bot.set_my_commands(bot_commands_for(lang), **kwargs)
         except Exception:
-            logger.debug(
-                "set_my_commands(language_code=%s) skipped",
+            logger.warning(
+                "set_my_commands(language_code=%s) failed",
                 lang_code,
                 exc_info=True,
             )
@@ -66,60 +61,58 @@ async def main() -> None:
     settings = get_settings()
 
     db = Database(settings.db_path)
-    await db.connect()
-
-    crypto = CryptoService(settings.encryption_key)
-
-    bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
-    )
-    dp = Dispatcher(storage=MemoryStorage())
-
-    timeout = aiohttp.ClientTimeout(total=60)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        api = S21ApiClient(
-            session,
-            auth_url=settings.auth_url,
-            graphql_url=settings.graphql_url,
-            school_id=settings.school_id,
+    async with db:
+        crypto = CryptoService(settings.encryption_key)
+        bot = Bot(
+            token=settings.bot_token,
+            default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
         )
+        dp = Dispatcher(storage=MemoryStorage())
+        timeout = aiohttp.ClientTimeout(total=60)
 
-        dp.include_router(get_start_router(db))
-        dp.include_router(get_auth_router(db, crypto, api))
-        dp.include_router(get_menu_router(db))
-        dp.include_router(get_settings_router(db, bot=bot))
-
-        scheduler = PeerReviewScheduler(
-            bot=bot,
-            db=db,
-            crypto=crypto,
-            api=api,
-            poll_interval_seconds=settings.poll_interval_seconds,
-        )
-
-        dp.include_router(
-            get_reviews_router(
-                db,
-                crypto,
-                api,
-                force_poll=scheduler.poll_user,
-            )
-        )
-
-        scheduler.start()
-
-        await set_bot_commands(bot)
-
-        logger.info("Bot is starting…")
         try:
-            # Drop pending updates so old /login commands with passwords
-            # are not re-processed after a restart.
-            await bot.delete_webhook(drop_pending_updates=True)
-            await dp.start_polling(bot)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                api = S21ApiClient(
+                    session,
+                    auth_url=settings.auth_url,
+                    graphql_url=settings.graphql_url,
+                    school_id=settings.school_id,
+                )
+
+                dp.include_router(get_start_router(db))
+                dp.include_router(get_auth_router(db, crypto, api))
+                dp.include_router(get_menu_router(db))
+                dp.include_router(get_settings_router(db, bot=bot))
+
+                scheduler = PeerReviewScheduler(
+                    bot=bot,
+                    db=db,
+                    crypto=crypto,
+                    api=api,
+                    poll_interval_seconds=settings.poll_interval_seconds,
+                )
+
+                dp.include_router(
+                    get_reviews_router(
+                        db,
+                        crypto,
+                        api,
+                        force_poll=scheduler.poll_user,
+                    )
+                )
+
+                scheduler.start()
+                try:
+                    await set_bot_commands(bot)
+
+                    logger.info("Bot is starting…")
+                    # Drop pending updates so old /login commands with passwords
+                    # are not re-processed after a restart.
+                    await bot.delete_webhook(drop_pending_updates=True)
+                    await dp.start_polling(bot)
+                finally:
+                    scheduler.shutdown()
         finally:
-            scheduler.shutdown()
-            await db.close()
             await bot.session.close()
             logger.info("Bot stopped")
 

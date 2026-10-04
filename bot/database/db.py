@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS events (
     start_time    TEXT    NOT NULL,
     end_time      TEXT,
     role          TEXT,
+    is_notified   INTEGER NOT NULL DEFAULT 0,
+    notified_booking_id TEXT,
     data          TEXT    NOT NULL DEFAULT '{}',
     created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -52,7 +54,8 @@ CREATE INDEX IF NOT EXISTS idx_events_user_status
 """
 
 _EVENT_COLUMNS = (
-    "id, user_id, s21_event_id, type, status, start_time, end_time, role, data"
+    "id, user_id, s21_event_id, type, status, start_time, end_time, role, "
+    "is_notified, notified_booking_id, data"
 )
 
 
@@ -73,16 +76,22 @@ class Database:
         """Open the connection and ensure schema exists."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._db_path)
-        self._conn.row_factory = aiosqlite.Row
-        # WAL: readers (handlers) and writer (poller) can proceed in parallel.
-        await self._conn.execute("PRAGMA journal_mode=WAL;")
-        await self._conn.execute("PRAGMA synchronous=NORMAL;")
-        await self._conn.execute("PRAGMA foreign_keys = ON;")
-        # Drop legacy tracking table from the previous architecture.
-        await self._conn.execute("DROP TABLE IF EXISTS known_events_state")
-        await self._conn.executescript(_SCHEMA_SQL)
-        await self._migrate_schema()
-        await self._conn.commit()
+        try:
+            self._conn.row_factory = aiosqlite.Row
+            # WAL + busy timeout make handler/poller write contention wait
+            # instead of failing immediately with "database is locked".
+            await self._conn.execute("PRAGMA journal_mode=WAL;")
+            await self._conn.execute("PRAGMA synchronous=NORMAL;")
+            await self._conn.execute("PRAGMA busy_timeout=5000;")
+            await self._conn.execute("PRAGMA foreign_keys = ON;")
+            await self._conn.execute("DROP TABLE IF EXISTS known_events_state")
+            await self._conn.executescript(_SCHEMA_SQL)
+            await self._migrate_schema()
+            await self._conn.commit()
+        except Exception:
+            await self._conn.close()
+            self._conn = None
+            raise
         logger.info("SQLite ready at %s", self._db_path)
 
     async def _migrate_schema(self) -> None:
@@ -100,6 +109,17 @@ class Database:
                 "ALTER TABLE events ADD COLUMN role TEXT"
             )
             logger.info("Migrated events table: added role column")
+        if "is_notified" not in event_columns:
+            await self._conn.execute(
+                "ALTER TABLE events ADD COLUMN is_notified "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("Migrated events table: added is_notified column")
+        if "notified_booking_id" not in event_columns:
+            await self._conn.execute(
+                "ALTER TABLE events ADD COLUMN notified_booking_id TEXT"
+            )
+            logger.info("Migrated events table: added notified_booking_id column")
 
         cursor = await self._conn.execute("PRAGMA table_info(users)")
         user_info = await cursor.fetchall()
@@ -116,8 +136,12 @@ class Database:
         # SQLite cannot ALTER NOT NULL → NULL; rebuild the table when needed.
         col_notnull = {row[1]: bool(row[3]) for row in user_info}
         if col_notnull.get("s21_login") or col_notnull.get("encrypted_password"):
-            await self._conn.executescript(
-                """
+            await self._conn.commit()
+            await self._conn.execute("PRAGMA foreign_keys = OFF")
+            try:
+                await self._conn.executescript(
+                    """
+                DROP TABLE IF EXISTS users_mig;
                 CREATE TABLE users_mig (
                     telegram_chat_id INTEGER PRIMARY KEY,
                     s21_login        TEXT,
@@ -137,10 +161,19 @@ class Database:
                 DROP TABLE users;
                 ALTER TABLE users_mig RENAME TO users;
                 """
-            )
+                )
+            finally:
+                await self._conn.execute("PRAGMA foreign_keys = ON")
             logger.info(
                 "Migrated users table: credentials columns are now nullable"
             )
+
+    async def __aenter__(self) -> "Database":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        await self.close()
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -359,15 +392,20 @@ class Database:
             """
             INSERT INTO events (
                 user_id, s21_event_id, type, status, start_time, end_time,
-                role, data
+                role, is_notified, notified_booking_id, data
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id, s21_event_id) DO UPDATE SET
                 type = excluded.type,
                 status = excluded.status,
                 start_time = excluded.start_time,
                 end_time = excluded.end_time,
                 role = excluded.role,
+                is_notified = MAX(events.is_notified, excluded.is_notified),
+                notified_booking_id = COALESCE(
+                    events.notified_booking_id,
+                    excluded.notified_booking_id
+                ),
                 data = excluded.data,
                 updated_at = datetime('now')
             """,
@@ -379,6 +417,8 @@ class Database:
                 event.start_time,
                 event.end_time,
                 role,
+                int(event.is_notified),
+                event.notified_booking_id,
                 data_json,
             ),
         )
@@ -391,6 +431,30 @@ class Database:
                 f"s21_id={event.s21_event_id}"
             )
         return saved
+
+    async def claim_event_notification(
+        self,
+        event_id: int,
+        booking_id: str,
+    ) -> bool:
+        """Atomically reserve one notification for a specific booking."""
+        cursor = await self.connection.execute(
+            """
+            UPDATE events
+            SET is_notified = 1,
+                notified_booking_id = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+              AND (
+                  is_notified = 0
+                  OR notified_booking_id IS NULL
+                  OR notified_booking_id != ?
+              )
+            """,
+            (booking_id, event_id, booking_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount == 1
 
     async def update_event_status(
         self,
@@ -484,4 +548,6 @@ class Database:
             end_time=end_time,
             data=data,
             role=role,
+            is_notified=bool(row["is_notified"]),
+            notified_booking_id=row["notified_booking_id"],
         )

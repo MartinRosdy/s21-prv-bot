@@ -1,7 +1,7 @@
 """Tests for 15-minute rule, time grid dot replacement, and format picker."""
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from bot.core.utils import TASHKENT_TZ
@@ -11,6 +11,8 @@ from bot.keyboards.reviews import (
     build_format_picker_kb,
     build_hour_picker_kb,
     build_minute_picker_kb,
+    compose_slot_datetimes,
+    is_slot_start_allowed,
 )
 
 
@@ -88,6 +90,42 @@ class TestTimeGrid(unittest.TestCase):
         self.assertIn("Онлайн", online_btn.text)
         self.assertIn("✅", online_btn.text)  # Highlighted as current
         self.assertEqual(online_btn.callback_data, "sw:fmt:1")
+
+    def test_future_day_end_before_start_is_disabled(self):
+        kb = build_hour_picker_kb(
+            which="eh",
+            day_offset=1,
+            start_hour=18,
+            start_minute=30,
+        )
+        hour_buttons = [
+            button
+            for row in kb.inline_keyboard
+            for button in row
+            if button.callback_data and button.callback_data.startswith("sw:")
+        ]
+        self.assertEqual(hour_buttons[0].text, ".")
+        self.assertEqual(hour_buttons[10].text, "18")  # 18:45 is still valid
+        self.assertEqual(hour_buttons[11].text, "19")
+
+    def test_final_guard_rejects_stale_callback(self):
+        now = datetime(2026, 10, 2, 18, 0, tzinfo=timezone.utc)
+        self.assertFalse(
+            is_slot_start_allowed(now + timedelta(minutes=14), now=now)
+        )
+        self.assertTrue(
+            is_slot_start_allowed(now + timedelta(minutes=15), now=now)
+        )
+
+    def test_compose_rejects_non_positive_interval(self):
+        with self.assertRaises(ValueError):
+            compose_slot_datetimes(
+                day_offset=1,
+                start_hour=18,
+                start_minute=30,
+                end_hour=18,
+                end_minute=15,
+            )
 
 
 if __name__ == "__main__":

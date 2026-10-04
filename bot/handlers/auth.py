@@ -41,21 +41,9 @@ _ASK_LOGIN = {
 }
 
 _ASK_PASSWORD = {
-    LANG_EN: (
-        "Great! Now enter your **password from School 21 platform**:\n"
-        "*(Important: use your School 21 platform password, not Telegram password. "
-        "It will be securely encrypted with AES-128 and never stored in plaintext)*"
-    ),
-    LANG_RU: (
-        "Отлично! Теперь введи свой **пароль от платформы Школы 21**:\n"
-        "*(Важно: требуется именно пароль от платформы Школы 21, а не от Telegram. "
-        "Он будет надежно зашифрован ключом AES-128 и нигде не сохранится в открытом виде)*"
-    ),
-    LANG_UZ: (
-        "Ajoyib! Endi **School 21 platformasi parolini** kiriting:\n"
-        "*(Muhim: Telegram paroli emas, aynan School 21 platformasi paroli kerak. "
-        "U AES-128 kaliti bilan ishonchli shifrlanadi va ochiq ko‘rinishda saqlanmaydi)*"
-    ),
+    LANG_EN: "Enter your School 21 platform password (it is securely encrypted):",
+    LANG_RU: "Введите пароль от платформы Школы 21 (он безопасно шифруется):",
+    LANG_UZ: "School 21 platformasi parolini kiriting (u xavfsiz shifrlanadi):",
 }
 
 

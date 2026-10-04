@@ -50,7 +50,7 @@ fragment CalendarEvent on CalendarEvent {
   description
   eventType
   eventCode
-  eventSlots { id type start end event { eventUserRole __typename } school { shortName __typename } __typename }
+  eventSlots { id type start end isOnline event { eventUserRole __typename } school { shortName __typename } __typename }
   bookings { ...CalendarReviewBooking __typename }
   exam { ...CalendarEventExam __typename }
   studentCodeReview { studentGoalId __typename }
@@ -168,7 +168,18 @@ class S21ApiClient:
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
-                body: dict[str, Any] = await resp.json(content_type=None)
+                text = await resp.text()
+                try:
+                    parsed = json.loads(text) if text else {}
+                except json.JSONDecodeError as exc:
+                    raise S21NetworkError(
+                        f"Keycloak returned invalid JSON ({resp.status})"
+                    ) from exc
+                body = parsed if isinstance(parsed, dict) else {}
+                if resp.status >= 500:
+                    raise S21NetworkError(
+                        f"Keycloak temporary HTTP error: {resp.status}"
+                    )
                 if resp.status != 200:
                     error = (
                         body.get("error_description")
@@ -184,6 +195,8 @@ class S21ApiClient:
                     raise S21AuthError("Keycloak response has no access_token")
                 return str(token)
         except S21AuthError:
+            raise
+        except S21NetworkError:
             raise
         except _NETWORK_ERRORS as exc:
             # Connection reset / timeout — not a wrong password.
@@ -357,13 +370,14 @@ class S21ApiClient:
         token: str,
         start_time_utc: str,
         end_time_utc: str,
+        is_online: bool = False,
     ) -> Any:
         """Create an open peer-review duty slot on the platform."""
         # Avoid f-strings here: GraphQL braces `{}` collide with f-string syntax.
         query_str = (
-            """mutation calendarAddEvent($start: DateTime!, $end: DateTime!) {
+            """mutation calendarAddEvent($start: DateTime!, $end: DateTime!, $isOnline: Boolean!) {
   student {
-    addEventToTimetable(start: $start, end: $end) {
+    addEventToTimetable(start: $start, end: $end, isOnline: $isOnline) {
       ...CalendarEvent
       __typename
     }
@@ -376,7 +390,11 @@ class S21ApiClient:
         return await self._post_mutation(
             token,
             operation_name="calendarAddEvent",
-            variables={"start": start_time_utc, "end": end_time_utc},
+            variables={
+                "start": start_time_utc,
+                "end": end_time_utc,
+                "isOnline": bool(is_online),
+            },
             query=query_str,
         )
 
@@ -398,13 +416,14 @@ class S21ApiClient:
         slot_id: str,
         new_start_utc: str,
         new_end_utc: str,
+        is_online: bool = False,
     ) -> Any:
         """Reschedule an existing open slot."""
         # Concatenate fragments with `+` — never f-strings with GraphQL `{}`.
         query_str = (
-            """mutation calendarChangeEventSlot($id: ID!, $start: DateTime!, $end: DateTime!) {
+            """mutation calendarChangeEventSlot($id: ID!, $start: DateTime!, $end: DateTime!, $isOnline: Boolean!) {
   student {
-    changeEventSlot(eventSlotId: $id, start: $start, end: $end) {
+    changeEventSlot(eventSlotId: $id, start: $start, end: $end, isOnline: $isOnline) {
       ...CalendarEvent
       __typename
     }
@@ -418,6 +437,7 @@ class S21ApiClient:
             "id": self._as_slot_id_int(slot_id),
             "start": new_start_utc,
             "end": new_end_utc,
+            "isOnline": bool(is_online),
         }
         return await self._post_mutation(
             token,
@@ -441,20 +461,6 @@ class S21ApiClient:
             variables={"eventSlotId": self._as_slot_id_int(slot_id)},
             query=query_str,
         )
-
-    async def toggle_online(
-        self,
-        token: str,
-        booking_id: str,
-        is_online: bool,
-    ) -> Any:
-        """Switch peer-review booking between online and offline."""
-        logger.info(
-            "toggle_online stub booking_id=%s is_online=%s",
-            booking_id,
-            is_online,
-        )
-        raise NotImplementedError("Нужно вставить оригинальный GraphQL payload")
 
     # ------------------------------------------------------------------ parse
 
@@ -570,6 +576,7 @@ class S21ApiClient:
                             "event_slot_id": event_slot_id,
                             "role": role,
                             "peer_login": None,
+                            "is_online": self._extract_open_slot_format(raw),
                         },
                     )
                 )
@@ -712,6 +719,16 @@ class S21ApiClient:
             if isinstance(slot, dict) and slot.get("id") is not None:
                 return str(slot["id"])
         return None
+
+    @staticmethod
+    def _extract_open_slot_format(raw: dict[str, Any]) -> bool:
+        """Read the format returned for an open event slot."""
+        slots = raw.get("eventSlots") or []
+        if isinstance(slots, list):
+            for slot in slots:
+                if isinstance(slot, dict) and "isOnline" in slot:
+                    return bool(slot["isOnline"])
+        return bool(raw.get("isOnline", False))
 
     @staticmethod
     def _event_user_role(container: Any) -> str:

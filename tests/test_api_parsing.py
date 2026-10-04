@@ -1,11 +1,12 @@
 """Tests for API calendar parsing and event filtering."""
 
 import unittest
+from unittest.mock import AsyncMock
 from bot.services.s21_api import S21ApiClient
 from bot.database.models import EVENT_TYPE_SLOT, EVENT_TYPE_PEER_REVIEW, STATUS_OPEN, STATUS_BOOKED
 
 
-class TestApiParsing(unittest.TestCase):
+class TestApiParsing(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         # S21ApiClient doesn't need actual session for static parsing methods
         self.api = S21ApiClient(
@@ -82,7 +83,9 @@ class TestApiParsing(unittest.TestCase):
             "end": "2026-10-02T18:00:00.000Z",
             "eventType": "SLOT",
             "eventCode": "REVIEW_SLOT",
-            "eventSlots": [{"id": 1010, "type": "SLOT"}],
+            "eventSlots": [
+                {"id": 1010, "type": "SLOT", "isOnline": True}
+            ],
             "bookings": [],
         }
         self.assertTrue(S21ApiClient._looks_like_open_slot(valid_slot))
@@ -92,6 +95,39 @@ class TestApiParsing(unittest.TestCase):
         self.assertEqual(items[0].type, EVENT_TYPE_SLOT)
         self.assertEqual(items[0].status, STATUS_OPEN)
         self.assertEqual(items[0].data["event_slot_id"], "1010")
+        self.assertTrue(items[0].data["is_online"])
+
+    async def test_create_slot_sends_selected_format(self):
+        post = AsyncMock(return_value={})
+        self.api._post_mutation = post
+
+        await self.api.create_slot(
+            "token",
+            "2026-10-02T15:00:00.000Z",
+            "2026-10-02T16:00:00.000Z",
+            True,
+        )
+
+        kwargs = post.await_args.kwargs
+        self.assertTrue(kwargs["variables"]["isOnline"])
+        self.assertIn("isOnline: $isOnline", kwargs["query"])
+
+    async def test_update_slot_sends_selected_format(self):
+        post = AsyncMock(return_value={})
+        self.api._post_mutation = post
+
+        await self.api.update_slot(
+            "token",
+            "1010",
+            "2026-10-02T15:00:00.000Z",
+            "2026-10-02T16:00:00.000Z",
+            True,
+        )
+
+        kwargs = post.await_args.kwargs
+        self.assertEqual(kwargs["variables"]["id"], 1010)
+        self.assertTrue(kwargs["variables"]["isOnline"])
+        self.assertIn("isOnline: $isOnline", kwargs["query"])
 
     def test_parse_valid_booked_peer_review(self):
         booked_event = {

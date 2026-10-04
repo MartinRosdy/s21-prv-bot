@@ -38,6 +38,7 @@ from bot.keyboards.reviews import (
     build_slots_list_kb,
     compose_slot_datetimes,
     day_offset_from_start,
+    is_slot_start_allowed,
     wizard_date_label,
 )
 from bot.routers.helpers import (
@@ -73,6 +74,7 @@ _TEXTS = {
         "start_partial": "Start: *{hh}:??*",
         "start_full": "Start: *{hh}:{mm}*",
         "end_partial": "End: *{hh}:??*",
+        "end_full": "End: *{hh}:{mm}*",
         "current_prefix": "ℹ️ Current slot time: {when}\n\n",
         "card_title": "🔍 *Slot card*",
         "time_line": "Time: {when}",
@@ -134,6 +136,7 @@ _TEXTS = {
         "start_partial": "Начало: *{hh}:??*",
         "start_full": "Начало: *{hh}:{mm}*",
         "end_partial": "Конец: *{hh}:??*",
+        "end_full": "Конец: *{hh}:{mm}*",
         "current_prefix": "ℹ️ Сейчас слот стоит на: {when}\n\n",
         "card_title": "🔍 *Карточка слота*",
         "time_line": "Время: {when}",
@@ -195,6 +198,7 @@ _TEXTS = {
         "start_partial": "Boshlanish: *{hh}:??*",
         "start_full": "Boshlanish: *{hh}:{mm}*",
         "end_partial": "Tugash: *{hh}:??*",
+        "end_full": "Tugash: *{hh}:{mm}*",
         "current_prefix": "ℹ️ Hozirgi slot vaqti: {when}\n\n",
         "card_title": "🔍 *Slot kartasi*",
         "time_line": "Vaqt: {when}",
@@ -635,7 +639,7 @@ def get_reviews_router(
                 f"{_tr(lang, title_key)}\n\n"
                 f"{_tr(lang, 'date_line', date=date_label)}\n"
                 f"{_tr(lang, 'start_full', hh=f'{start_h:02d}', mm=f'{start_m:02d}')}\n"
-                f"Конец: *{end_h:02d}:{end_m:02d}*\n\n"
+                f"{_tr(lang, 'end_full', hh=f'{end_h:02d}', mm=f'{end_m:02d}')}\n\n"
                 f"{_tr(lang, 'step_format')}",
                 reply_markup=build_format_picker_kb(
                     language=lang,
@@ -703,13 +707,26 @@ def get_reviews_router(
             await callback.answer(_tr(lang, "session_reset"), show_alert=True)
             return
 
-        start_dt, end_dt = compose_slot_datetimes(
-            day_offset=day_offset,
-            start_hour=start_hour,
-            start_minute=start_minute,
-            end_hour=end_hour,
-            end_minute=end_minute,
-        )
+        try:
+            start_dt, end_dt = compose_slot_datetimes(
+                day_offset=day_offset,
+                start_hour=start_hour,
+                start_minute=start_minute,
+                end_hour=end_hour,
+                end_minute=end_minute,
+            )
+        except ValueError:
+            await callback.answer(
+                _tr(lang, "time_unavailable"),
+                show_alert=True,
+            )
+            return
+        if not is_slot_start_allowed(start_dt):
+            await callback.answer(
+                _tr(lang, "time_unavailable"),
+                show_alert=True,
+            )
+            return
         mode = data.get("wizard_mode") or "create"
 
         try:
@@ -731,6 +748,7 @@ def get_reviews_router(
                     str(s21_id),
                     utc_iso(start_dt),
                     utc_iso(end_dt),
+                    is_online,
                 )
                 existing_ev = await db.get_event_by_id(int(slot_id))
                 ev_data = dict(existing_ev.data if existing_ev else {})
@@ -744,7 +762,12 @@ def get_reviews_router(
                 )
                 ok_text = _tr(lang, "updated_ok")
             else:
-                await api.create_slot(token, utc_iso(start_dt), utc_iso(end_dt))
+                await api.create_slot(
+                    token,
+                    utc_iso(start_dt),
+                    utc_iso(end_dt),
+                    is_online,
+                )
                 ok_text = _tr(lang, "created_ok")
         except AuthRequiredError:
             await state.clear()
@@ -800,7 +823,7 @@ def get_reviews_router(
             await callback.answer()
             return
         cat = callback.data.split(":", 1)[1]
-        category_filter = None if cat == "all" else cat
+        category_filter = cat if cat in {"evaluator", "evaluated", "open"} else None
         try:
             user = await require_user(db, callback.from_user.id)
         except AuthRequiredError:
@@ -1025,18 +1048,30 @@ def get_reviews_router(
             await callback.answer(_tr(lang, "not_found"), show_alert=True)
             return
 
-        new_online = not bool(slot.data.get("is_online"))
+        if slot.effective_role != ROLE_EVALUATOR:
+            await callback.answer(_tr(lang, "evaluator_only"), show_alert=True)
+            return
 
-        # If booked, attempt platform mutation if supported
-        booking_id = str(slot.data.get("booking_id") or "")
-        if booking_id:
-            try:
-                token = await get_user_token(user, crypto=crypto, api=api)
-                await api.toggle_online(token, booking_id, new_online)
-            except NotImplementedError:
-                pass  # Graceful fallback: local state update
-            except Exception as exc:
-                logger.warning("toggle_online platform error: %s", exc)
+        new_online = not bool(slot.data.get("is_online"))
+        try:
+            token = await get_user_token(user, crypto=crypto, api=api)
+            await api.update_slot(
+                token,
+                _platform_slot_id(slot),
+                slot.start_time,
+                slot.end_time or slot.start_time,
+                new_online,
+            )
+        except AuthRequiredError:
+            await callback.answer(_tr(lang, "auth_platform"), show_alert=True)
+            return
+        except (PlatformNetworkError, S21NetworkError):
+            await callback.answer(_tr(lang, "network"), show_alert=True)
+            return
+        except S21ApiError as exc:
+            logger.warning("slot format update failed: %s", exc)
+            await callback.answer(_tr(lang, "toggle_reject"), show_alert=True)
+            return
 
         new_data = dict(slot.data)
         new_data["is_online"] = new_online
