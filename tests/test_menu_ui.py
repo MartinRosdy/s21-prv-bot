@@ -11,18 +11,18 @@ from bot.database.models import (
     STATUS_OPEN,
     TrackedEvent,
 )
-from bot.handlers.auth import _ASK_LOGIN, _ASK_PASSWORD
+from bot.handlers.auth import _ASK_LOGIN, _ASK_PASSWORD, _LOGIN_NOTICE
 from bot.handlers.start import FIRST_START_PROMPT, help_text
-from bot.keyboards.menu import build_main_menu_kb, main_menu_text
+from bot.keyboards.menu import build_help_kb, build_main_menu_kb, main_menu_text
 from bot.keyboards.reviews import build_slot_card_kb, build_slots_list_kb
-from bot.routers.reviews import _slot_card_text
+from bot.routers.reviews import _TEXTS, _slot_card_text
 
 
 class TestMenuUi(unittest.TestCase):
     def test_main_menu_has_copyable_login_stats_and_one_button(self):
         text = main_menu_text(
             "ru",
-            "peer<&",
+            "Peer<&",
             evaluator_count=2,
             evaluated_count=1,
         )
@@ -101,14 +101,42 @@ class TestMenuUi(unittest.TestCase):
         )
         self.assertEqual(_ASK_LOGIN["ru"], "Введите ваш логин от Школы 21:")
         self.assertEqual(_ASK_PASSWORD["ru"], "Введите ваш пароль от Школы 21:")
-        self.assertNotIn(">", _ASK_LOGIN["ru"] + _ASK_PASSWORD["ru"])
+        self.assertIn("<blockquote>", _LOGIN_NOTICE["ru"])
+        self.assertIn("AES-128", _LOGIN_NOTICE["ru"])
+
+    def test_empty_slots_text_is_exact(self):
+        self.assertEqual(
+            _TEXTS["ru"]["no_slots"],
+            "📬 У вас пока нет запланированных проверок и свободных слотов",
+        )
 
     def test_help_has_exact_t15_line(self):
         text = help_text("ru")
         exact = "2. ⏳ За 15 минут: напоминание с никнеймом пира, ролью и форматом"
         self.assertIn(exact, text)
         self.assertNotIn("кнопка смены формата", text.lower())
-        self.assertIn("А для занятого — переключить на онлайн формат", text)
+        self.assertIn("Для занятого слота можно сменить формат на онлайн", text)
+        self.assertIn(
+            "• 🔍 Я проверяющий (Evaluator): твои открытые ревью слоты, где ты оцениваешь чужой проект",
+            text,
+        )
+
+    def test_help_localizations_have_identical_structure_and_home_button(self):
+        texts = [help_text(lang) for lang in ("ru", "en", "uz")]
+        self.assertEqual({len(text.splitlines()) for text in texts}, {31})
+        for text in texts:
+            for marker in ("📖", "🤖", "🧭", "⏳", "🌐", "🔔", "⌨️", "👨‍💻"):
+                self.assertIn(marker, text)
+
+        expected = {
+            "ru": "🏠 Главное меню",
+            "en": "🏠 Main menu",
+            "uz": "🏠 Asosiy menyu",
+        }
+        for lang, label in expected.items():
+            button = build_help_kb(lang).inline_keyboard[0][0]
+            self.assertEqual(button.text, label)
+            self.assertEqual(button.callback_data, "menu_home")
 
 
 if __name__ == "__main__":

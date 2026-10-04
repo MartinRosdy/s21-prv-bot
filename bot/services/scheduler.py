@@ -95,7 +95,7 @@ def _split_interval(when: str) -> tuple[str, str]:
 
 def _peer_display(raw: object | None, language: str | None = None) -> str:
     """Human-readable peer login for notifications."""
-    value = str(raw).strip() if raw else ""
+    value = str(raw).strip().lower() if raw else ""
     lang = _notification_language(language)
     return value or _NOTIFICATION_TEXTS[lang]["unknown"]
 
@@ -146,7 +146,7 @@ def _format_toggle_markup(
     event: TrackedEvent,
     language: str | None,
 ) -> InlineKeyboardMarkup | None:
-    """Booking format action for the T-15 reminder."""
+    """Format action for any booked review, regardless of time to start."""
     if event.id is None or event.status != STATUS_BOOKED:
         return None
     lang = language if language in {"en", "ru", "uz"} else DEFAULT_LANGUAGE
@@ -544,6 +544,7 @@ class PeerReviewScheduler:
             user_id,
             text,
             parse_mode="HTML",
+            reply_markup=_format_toggle_markup(saved, language),
         )
         return True
 

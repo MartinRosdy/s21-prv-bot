@@ -79,6 +79,12 @@ _BACK_TO_MENU = {
     LANG_UZ: "🔙 Menyuga qaytish",
 }
 
+_HELP_HOME = {
+    LANG_EN: "🏠 Main menu",
+    LANG_RU: "🏠 Главное меню",
+    LANG_UZ: "🏠 Asosiy menyu",
+}
+
 # Backwards-compatible default (Russian).
 BACK_TO_MENU_LABEL = _BACK_TO_MENU[LANG_RU]
 
@@ -98,8 +104,9 @@ def main_menu_text(
     evaluated_count: int = 0,
 ) -> str:
     """Localized main-menu caption."""
+    normalized_login = (login or "—").strip().lower()
     return _MAIN_MENU_TEXT[normalize_language(language)].format(
-        login=f"<code>{html.escape(login or '—')}</code>",
+        login=f"<code>{html.escape(normalized_login)}</code>",
         evaluator_count=max(0, evaluator_count),
         evaluated_count=max(0, evaluated_count),
     )
@@ -162,3 +169,18 @@ def build_back_to_menu_kb(language: str | None = None) -> InlineKeyboardMarkup:
         )
     )
     return builder.as_markup()
+
+
+def build_help_kb(language: str | None = None) -> InlineKeyboardMarkup:
+    """Single localized home button displayed below /help."""
+    lang = normalize_language(language)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_HELP_HOME[lang],
+                    callback_data="menu_home",
+                )
+            ]
+        ]
+    )

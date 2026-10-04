@@ -21,7 +21,11 @@ class TestDatabase(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as temp_dir:
             db = Database(Path(temp_dir) / "bot.db")
             async with db:
-                await db.upsert_user(100, "peer", "encrypted")
+                await db.upsert_user(100, "PeEr", "encrypted")
+                normalized_user = await db.get_user(100)
+                self.assertIsNotNone(normalized_user)
+                assert normalized_user is not None
+                self.assertEqual(normalized_user.s21_login, "peer")
                 saved = await db.upsert_event(
                     TrackedEvent(
                         id=None,

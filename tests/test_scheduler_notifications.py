@@ -22,7 +22,7 @@ class TestSchedulerNotifications(unittest.TestCase):
     def test_trigger_1_instant_booked_evaluator(self):
         text = _build_booked_instant_text(
             role=ROLE_EVALUATOR,
-            peer_raw="peer_student",
+            peer_raw="Peer_Student",
             when="2 октября, 19:30 - 20:00",
             is_online=True,
             language="ru",
@@ -136,6 +136,11 @@ class TestBookingNotificationGuard(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await scheduler._notify_booking_once(100, event, "new"))
         self.assertFalse(await scheduler._notify_booking_once(100, event, "new"))
         bot.send_message.assert_awaited_once()
+        markup = bot.send_message.await_args.kwargs["reply_markup"]
+        self.assertEqual(
+            markup.inline_keyboard[0][0].callback_data,
+            "slot_toggle_online:10",
+        )
         db.claim_event_notification.assert_any_await(10, "future")
 
     async def test_past_booking_is_completed_without_notification(self):

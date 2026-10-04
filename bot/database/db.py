@@ -180,6 +180,19 @@ class Database:
                 "Migrated users table: credentials columns are now nullable"
             )
 
+        # School 21 logins are case-insensitive. Normalize legacy rows too so
+        # API authentication, storage, and every UI surface use one form.
+        cursor = await self._conn.execute(
+            """
+            UPDATE users
+            SET s21_login = LOWER(TRIM(s21_login)),
+                updated_at = datetime('now')
+            WHERE s21_login IS NOT NULL
+              AND s21_login != LOWER(TRIM(s21_login))
+            """
+        )
+        await cursor.close()
+
     async def __aenter__(self) -> "Database":
         await self.connect()
         return self
@@ -233,6 +246,7 @@ class Database:
         New rows get ``language='ru'`` by default. On conflict only login /
         password are updated — language preference is preserved.
         """
+        normalized_login = s21_login.strip().lower()
         async with self.transaction() as connection:
             await self._execute_write(
                 connection,
@@ -248,7 +262,7 @@ class Database:
                 """,
                 (
                     telegram_chat_id,
-                    s21_login,
+                    normalized_login,
                     encrypted_password,
                     DEFAULT_LANGUAGE,
                 ),
@@ -588,7 +602,11 @@ class Database:
             language = DEFAULT_LANGUAGE
         return User(
             telegram_chat_id=row["telegram_chat_id"],
-            s21_login=row["s21_login"],
+            s21_login=(
+                str(row["s21_login"]).strip().lower()
+                if row["s21_login"] is not None
+                else None
+            ),
             encrypted_password=row["encrypted_password"],
             language=str(language),
             created_at=row["created_at"],

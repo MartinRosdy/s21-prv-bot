@@ -69,7 +69,7 @@ SLOT_TYPES = frozenset({EVENT_TYPE_SLOT, EVENT_TYPE_PEER_REVIEW})
 
 _TEXTS = {
     LANG_EN: {
-        "no_slots": "📭 You have no planned reviews or open slots yet. It is a great time to create one!",
+        "no_slots": "📬 You have no scheduled reviews or open slots yet",
         "your_slots": "Your peer-review slots:",
         "create_title": "➕ *Create slot*",
         "edit_title": "🔄 *Change slot time*",
@@ -117,6 +117,7 @@ _TEXTS = {
         "auth_platform": "Platform auth error",
         "delete_reject": "Platform rejected deletion",
         "booked_only": "Available only for a booked slot",
+        "format_in_development": "Switching the format to online is still in development",
         "online": "Online",
         "offline": "Offline",
         "session_expired": "Session expired, start over",
@@ -127,7 +128,7 @@ _TEXTS = {
         "category_evaluated": "Being checked",
     },
     LANG_RU: {
-        "no_slots": "📭 У вас пока нет запланированных проверок и свободных слотов. Самое время это исправить!",
+        "no_slots": "📬 У вас пока нет запланированных проверок и свободных слотов",
         "your_slots": "Твои слоты на пир-ревью:",
         "create_title": "➕ *Создание слота*",
         "edit_title": "🔄 *Изменение времени слота*",
@@ -175,6 +176,7 @@ _TEXTS = {
         "auth_platform": "Ошибка авторизации на платформе",
         "delete_reject": "Платформа отклонила удаление",
         "booked_only": "Доступно только для занятого слота",
+        "format_in_development": "Смена формата на онлайн пока в разработке",
         "online": "Онлайн",
         "offline": "Офлайн",
         "session_expired": "Сессия истекла, начни заново",
@@ -185,7 +187,7 @@ _TEXTS = {
         "category_evaluated": "Меня проверяют",
     },
     LANG_UZ: {
-        "no_slots": "📭 Hozircha rejalashtirilgan tekshiruvlar yoki bo‘sh slotlar yo‘q. Birinchi slotni yarating!",
+        "no_slots": "📬 Hozircha rejalashtirilgan tekshiruvlar yoki bo‘sh slotlar yo‘q",
         "your_slots": "Peer-review slotlaringiz:",
         "create_title": "➕ *Slot yaratish*",
         "edit_title": "🔄 *Slot vaqtini o‘zgartirish*",
@@ -233,6 +235,7 @@ _TEXTS = {
         "auth_platform": "Platformada avtorizatsiya xatosi",
         "delete_reject": "Platforma o‘chirishni rad etdi",
         "booked_only": "Faqat band slot uchun mavjud",
+        "format_in_development": "Formatni onlaynga o‘zgartirish hali ishlab chiqilmoqda",
         "online": "Online",
         "offline": "Offline",
         "session_expired": "Sessiya tugadi, qaytadan boshlang",
@@ -305,9 +308,13 @@ def _slot_card_text(slot: TrackedEvent, language: str | None = None) -> str:
         status_line = _tr(lang, "status_open")
         peer_line = _tr(lang, "peer_none")
     else:
-        peer = escape_md_code(
-            str(slot.data.get("peer_login") or _tr(lang, "peer_unknown"))
+        raw_peer = slot.data.get("peer_login")
+        peer_text = (
+            str(raw_peer).strip().lower()
+            if raw_peer
+            else _tr(lang, "peer_unknown")
         )
+        peer = escape_md_code(peer_text)
         peer = f"`{peer}`"
         status_line = _tr(lang, "status_booked")
         peer_key = (
@@ -1020,7 +1027,7 @@ def get_reviews_router(
             await callback.answer(_tr(lang, "booked_only"), show_alert=True)
             return
         await callback.answer(
-            "Смена формата на онлайн пока в разработке",
+            _tr(lang, "format_in_development"),
             show_alert=True,
         )
 

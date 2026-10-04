@@ -3,6 +3,7 @@
 from bot.keyboards.menu import (
     BACK_TO_MENU_LABEL,
     build_back_to_menu_kb,
+    build_help_kb,
     build_lang_kb,
     build_main_menu_kb,
     build_settings_kb,
@@ -21,6 +22,7 @@ from bot.keyboards.reviews import (
 __all__ = [
     "BACK_TO_MENU_LABEL",
     "build_back_to_menu_kb",
+    "build_help_kb",
     "build_lang_kb",
     "build_main_menu_kb",
     "build_settings_kb",

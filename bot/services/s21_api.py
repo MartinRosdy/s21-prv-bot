@@ -798,14 +798,14 @@ class S21ApiClient:
             return None
         first = students[0]
         if isinstance(first, dict) and first.get("login"):
-            return str(first["login"])
+            return str(first["login"]).strip().lower()
         return None
 
     @staticmethod
     def _peer_from_verifier(booking: dict[str, Any]) -> Optional[str]:
         verifier = booking.get("verifierUser")
         if isinstance(verifier, dict) and verifier.get("login"):
-            return str(verifier["login"])
+            return str(verifier["login"]).strip().lower()
         return None
 
     @classmethod
@@ -823,7 +823,7 @@ class S21ApiClient:
                     continue
                 user = item.get("user")
                 if isinstance(user, dict) and user.get("login"):
-                    return str(user["login"])
+                    return str(user["login"]).strip().lower()
                 if item.get("login"):
-                    return str(item["login"])
+                    return str(item["login"]).strip().lower()
         return None

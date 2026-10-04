@@ -147,7 +147,7 @@ class TestApiParsing(unittest.IsolatedAsyncioTestCase):
                         "event": {"eventUserRole": "EVALUATOR"},
                     },
                     "verifiableInfo": {
-                        "verifiableStudents": [{"login": "student_peer"}]
+                        "verifiableStudents": [{"login": "Student_Peer"}]
                     },
                     "task": {"goalName": "C_SimpleBashUtils"},
                 }
