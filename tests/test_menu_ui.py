@@ -11,7 +11,7 @@ from bot.database.models import (
     STATUS_OPEN,
     TrackedEvent,
 )
-from bot.handlers.auth import _ASK_LOGIN, _ASK_PASSWORD
+from bot.handlers.auth import _ASK_LOGIN, _ASK_PASSWORD, _RETRY_LOGIN
 from bot.handlers.start import FIRST_START_PROMPT, help_text
 from bot.keyboards.menu import build_help_kb, build_main_menu_kb, main_menu_text
 from bot.keyboards.reviews import build_slot_card_kb, build_slots_list_kb
@@ -105,6 +105,11 @@ class TestMenuUi(unittest.TestCase):
         self.assertNotIn("<blockquote>", _ASK_LOGIN["ru"])
         self.assertNotIn("⚠️", _ASK_LOGIN["ru"])
         self.assertNotIn("🔒", _ASK_LOGIN["ru"])
+        self.assertEqual(
+            _RETRY_LOGIN["ru"],
+            "Попробуйте еще раз ввести логин:",
+        )
+        self.assertEqual(set(_RETRY_LOGIN), {"ru", "en", "uz"})
 
     def test_welcome_localizations_have_identical_full_structure(self):
         texts = [start_welcome_text(lang) for lang in ("ru", "en", "uz")]

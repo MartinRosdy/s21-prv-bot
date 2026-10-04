@@ -79,6 +79,12 @@ _AUTH_ERR = {
     ),
 }
 
+_RETRY_LOGIN = {
+    LANG_EN: "Please enter your login again:",
+    LANG_RU: "Попробуйте еще раз ввести логин:",
+    LANG_UZ: "Loginni yana bir bor kiriting:",
+}
+
 _ENCRYPT_ERR = {
     LANG_EN: "❌ Encryption error — check ENCRYPTION_KEY",
     LANG_RU: "❌ Ошибка шифрования — проверь ENCRYPTION_KEY",
@@ -251,7 +257,11 @@ def get_auth_router(
         except S21AuthError as exc:
             logger.info("Login rejected for chat_id=%s: %s", chat_id, exc)
             await status_msg.edit_text(_AUTH_ERR[lang])
-            await state.set_state(AuthStates.waiting_for_password)
+            # Keep the authorization flow active, but discard the rejected
+            # login so the next plain-text message is treated as a new login.
+            await state.update_data(auth_login=None)
+            await state.set_state(AuthStates.waiting_for_login)
+            await message.answer(_RETRY_LOGIN[lang])
             return
         except ValueError as exc:
             logger.error("Encryption error for chat_id=%s: %s", chat_id, exc)
