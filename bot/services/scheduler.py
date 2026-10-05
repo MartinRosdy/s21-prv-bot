@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 
 from aiogram import Bot
@@ -450,7 +450,7 @@ class PeerReviewScheduler:
                 s21_id,
                 row.id,
             )
-            if row.id is not None and not self._starts_in_future(row):
+            if row.id is not None and not self._ends_in_future(row):
                 await self._db.update_event_status(row.id, STATUS_COMPLETED)
                 self._remove_reminder_jobs(row.id)
                 logger.info(
@@ -503,11 +503,30 @@ class PeerReviewScheduler:
 
     @staticmethod
     def _starts_in_future(item: CalendarSnapshotItem | TrackedEvent) -> bool:
-        """Return False for malformed or already-started review slots."""
+        """Notification guard: a booking alert is only valid before start."""
         try:
             return parse_iso_utc(item.start_time) > utc_now()
         except (TypeError, ValueError):
             logger.warning("Invalid event start_time: %r", item.start_time)
+            return False
+
+    @staticmethod
+    def _ends_in_future(
+        item: CalendarSnapshotItem | TrackedEvent,
+        *,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Display/lifecycle guard: an event stays active until its end."""
+        try:
+            boundary = item.end_time or item.start_time
+            current = now if now is not None else utc_now()
+            return parse_iso_utc(boundary) > current
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid event end_time: %r (start=%r)",
+                item.end_time,
+                item.start_time,
+            )
             return False
 
     async def _notify_booking_once(
@@ -527,7 +546,11 @@ class PeerReviewScheduler:
                 saved.s21_event_id,
                 saved.start_time,
             )
-            if saved.id is not None and saved.status == STATUS_BOOKED:
+            if (
+                saved.id is not None
+                and saved.status == STATUS_BOOKED
+                and not self._ends_in_future(saved)
+            ):
                 await self._db.update_event_status(saved.id, STATUS_COMPLETED)
             return False
         booking_id = str(
@@ -560,8 +583,9 @@ class PeerReviewScheduler:
         role = _resolve_role(item)
         is_online = item.data.get("is_online")
 
-        # Never create or revive active DB rows for already-started API items.
-        if not self._starts_in_future(item):
+        # A slot remains active while it is in progress; complete it only once
+        # its end time has passed.
+        if not self._ends_in_future(item):
             booking_id = str(item.data.get("booking_id") or item.s21_event_id)
             saved = await self._db.upsert_event(
                 self._tracked_from_item(
@@ -748,7 +772,7 @@ class PeerReviewScheduler:
         user_id: int,
         api_by_id: dict[str, CalendarSnapshotItem],
     ) -> None:
-        """Mark BOOKED rows whose start_time is in the past as COMPLETED."""
+        """Mark BOOKED rows as COMPLETED only after their end time."""
         now = utc_now()
         active = await self._db.get_events(user_id, active_only=True)
         for row in active:
@@ -756,14 +780,10 @@ class PeerReviewScheduler:
                 continue
             if row.type not in REVIEW_EVENT_TYPES:
                 continue
-            try:
-                start = parse_iso_utc(row.start_time)
-            except ValueError:
-                continue
-            if start + timedelta(minutes=1) < now and row.s21_event_id in api_by_id:
+            if not self._ends_in_future(row, now=now) and row.s21_event_id in api_by_id:
                 await self._db.update_event_status(row.id, STATUS_COMPLETED)
                 logger.info(
-                    "Marked COMPLETED user=%s db_id=%s (start passed)",
+                    "Marked COMPLETED user=%s db_id=%s (end passed)",
                     user_id,
                     row.id,
                 )
@@ -859,9 +879,6 @@ class PeerReviewScheduler:
             event_db_id,
             minutes_before,
         )
-
-        if minutes_before == 0 and row.id is not None:
-            await self._db.update_event_status(row.id, STATUS_COMPLETED)
 
     def _build_reminder_text(
         self,

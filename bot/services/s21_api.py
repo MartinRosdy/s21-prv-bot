@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import timedelta
 from typing import Any, Optional
 
 import aiohttp
 
-from bot.core.utils import days_from_now, utc_iso, utc_now
+from bot.core.utils import utc_iso, utc_now
 from bot.database.models import (
     DEFAULT_ROLE,
     EVENT_TYPE_PEER_REVIEW,
@@ -245,8 +246,10 @@ class S21ApiClient:
         """
         now = utc_now()
         variables = {
-            "from": utc_iso(now),
-            "to": utc_iso(days_from_now(days_ahead)),
+            # Include already-started events.  The API window is start-based,
+            # so using ``now`` here made long, still-active slots disappear.
+            "from": utc_iso(now - timedelta(days=1)),
+            "to": utc_iso(now + timedelta(days=days_ahead)),
         }
         payload = {
             "operationName": "calendarGetEvents",

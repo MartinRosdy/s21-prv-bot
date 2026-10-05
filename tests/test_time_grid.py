@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from bot.core.utils import TASHKENT_TZ
+from bot.core.utils import TASHKENT_TZ, is_interval_active
 from bot.keyboards.reviews import (
     MIN_BOOKING_LEAD_MINUTES,
     MIN_SLOT_DURATION_MINUTES,
@@ -14,10 +14,29 @@ from bot.keyboards.reviews import (
     build_minute_picker_kb,
     compose_slot_datetimes,
     is_slot_start_allowed,
+    quick_end_time,
+    quick_start_time,
 )
 
 
 class TestTimeGrid(unittest.TestCase):
+    def test_ongoing_interval_is_active_until_end(self):
+        now = datetime(2026, 10, 5, 13, 24, tzinfo=timezone.utc)
+        self.assertTrue(
+            is_interval_active(
+                "2026-10-05T07:00:00.000Z",
+                "2026-10-05T18:00:00.000Z",
+                now=now,
+            )
+        )
+        self.assertFalse(
+            is_interval_active(
+                "2026-10-05T07:00:00.000Z",
+                "2026-10-05T13:00:00.000Z",
+                now=now,
+            )
+        )
+
     def test_15_minute_rule_logic(self):
         """
         At 18:16 Tashkent time:
@@ -85,6 +104,23 @@ class TestTimeGrid(unittest.TestCase):
         hours = buttons[:24]
         self.assertEqual([button.text for button in hours], [str(h) for h in range(24)])
         self.assertEqual(hours[8].callback_data, "sw:sh:8")
+        self.assertEqual(buttons[-1].text, "🕒 Выбрать текущее время")
+        self.assertEqual(buttons[-1].callback_data, "sw:now:0")
+
+    def test_end_hour_picker_includes_next_day_midnight(self):
+        kb = build_hour_picker_kb(
+            which="eh",
+            day_offset=1,
+            start_hour=23,
+            start_minute=30,
+        )
+        midnight = next(
+            button
+            for row in kb.inline_keyboard
+            for button in row
+            if button.callback_data == "sw:eh:24"
+        )
+        self.assertEqual(midnight.text, "00")
 
     def test_future_day_end_before_start_is_disabled(self):
         kb = build_hour_picker_kb(
@@ -115,10 +151,23 @@ class TestTimeGrid(unittest.TestCase):
         self.assertEqual(row[3].text, "•")
         self.assertEqual(row[3].callback_data, "sw:disabled:0")
 
-    def test_late_start_without_30_minute_end_is_disabled(self):
+    def test_late_start_can_end_at_next_day_midnight(self):
         kb = build_minute_picker_kb(which="sm", day_offset=1, hour=23)
         row = kb.inline_keyboard[0]
-        self.assertEqual([button.text for button in row], ["00", "15", "•", "•"])
+        self.assertEqual([button.text for button in row], ["00", "15", "30", "•"])
+
+    def test_midnight_end_allows_only_zero_minutes(self):
+        kb = build_minute_picker_kb(
+            which="em",
+            day_offset=1,
+            hour=24,
+            start_hour=23,
+            start_minute=30,
+        )
+        self.assertEqual(
+            [button.text for button in kb.inline_keyboard[0]],
+            ["00", "•", "•", "•"],
+        )
 
     def test_final_guard_rejects_stale_callback(self):
         now = datetime(2026, 10, 2, 18, 0, tzinfo=timezone.utc)
@@ -159,6 +208,35 @@ class TestTimeGrid(unittest.TestCase):
             end_minute=0,
         )
         self.assertEqual(end - start, timedelta(minutes=30))
+
+    def test_compose_midnight_end_uses_next_day(self):
+        start, end = compose_slot_datetimes(
+            day_offset=1,
+            start_hour=23,
+            start_minute=30,
+            end_hour=24,
+            end_minute=0,
+        )
+        local_start = start.astimezone(TASHKENT_TZ)
+        local_end = end.astimezone(TASHKENT_TZ)
+        self.assertEqual(local_end.date(), local_start.date() + timedelta(days=1))
+        self.assertEqual((local_end.hour, local_end.minute), (0, 0))
+        self.assertEqual(end - start, timedelta(minutes=30))
+
+    def test_quick_time_rounding_and_minimum_duration(self):
+        now = datetime(2026, 10, 2, 18, 24, tzinfo=TASHKENT_TZ)
+        self.assertEqual(
+            quick_start_time(now.date(), now=now),
+            (18, 45),
+        )
+        self.assertEqual(
+            quick_end_time(now.date(), 19, 0, now=now),
+            (19, 30),
+        )
+        self.assertEqual(
+            quick_end_time(now.date(), 23, 30, now=now),
+            (24, 0),
+        )
 
 
 if __name__ == "__main__":

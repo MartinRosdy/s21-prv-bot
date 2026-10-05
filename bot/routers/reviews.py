@@ -16,6 +16,7 @@ from bot.core.utils import (
     escape_md,
     escape_md_code,
     format_datetime,
+    is_interval_active,
     to_tashkent,
     utc_iso,
     utc_now,
@@ -49,6 +50,8 @@ from bot.keyboards.reviews import (
     compose_slot_datetimes,
     day_offset_from_start,
     is_slot_start_allowed,
+    quick_end_time,
+    quick_start_time,
     wizard_date_label,
 )
 from bot.routers.helpers import (
@@ -341,7 +344,12 @@ def _slot_card_text(slot: TrackedEvent, language: str | None = None) -> str:
 
 async def _load_slots(db: Database, user_id: int) -> list[TrackedEvent]:
     events = await db.get_events(user_id, active_only=True)
-    slots = [e for e in events if _is_review_slot(e)]
+    slots = [
+        event
+        for event in events
+        if _is_review_slot(event)
+        and is_interval_active(event.start_time, event.end_time)
+    ]
     slots.sort(key=lambda e: e.start_time)
     return slots
 
@@ -608,7 +616,7 @@ def get_reviews_router(
                 f"{_tr(lang, title_key)}\n\n"
                 f"{_tr(lang, 'date_line', date=date_label)}\n"
                 f"{_tr(lang, 'start_full', hh=f'{start_h:02d}', mm=f'{start_m:02d}')}\n"
-                f"{_tr(lang, 'end_partial', hh=f'{end_h:02d}')}\n"
+                f"{_tr(lang, 'end_partial', hh='00' if end_h == 24 else f'{end_h:02d}')}\n"
                 f"{_tr(lang, 'step_end_minute')}",
                 reply_markup=build_minute_picker_kb(
                     which="em",
@@ -915,6 +923,15 @@ def get_reviews_router(
         )
         local_start = to_tashkent(slot.start_time)
         local_end = to_tashkent(slot.end_time) if slot.end_time else None
+        highlight_end_hour = None
+        if local_end is not None:
+            highlight_end_hour = (
+                24
+                if local_end.date() == local_start.date() + timedelta(days=1)
+                and local_end.hour == 0
+                and local_end.minute == 0
+                else local_end.hour
+            )
 
         await _start_wizard(
             callback,
@@ -928,7 +945,7 @@ def get_reviews_router(
             current_label=current_label,
             highlight_start_hour=local_start.hour,
             highlight_start_minute=local_start.minute,
-            highlight_end_hour=local_end.hour if local_end else None,
+            highlight_end_hour=highlight_end_hour,
             highlight_end_minute=local_end.minute if local_end else None,
         )
         await callback.answer()
@@ -1075,7 +1092,64 @@ def get_reviews_router(
             await _wizard_back(callback, state)
             return
 
-        if callback_data.act in {"sh", "eh"} and callback_data.val not in range(24):
+        if callback_data.act == "now":
+            time_states = {
+                SlotFSM.picking_start_hour.state,
+                SlotFSM.picking_start_minute.state,
+                SlotFSM.picking_end_hour.state,
+                SlotFSM.picking_end_minute.state,
+            }
+            if current not in time_states:
+                await callback.answer(
+                    _tr(lang, "session_expired"),
+                    show_alert=True,
+                )
+                return
+            try:
+                selected = date.fromisoformat(str(data["selected_date"]))
+                if current in {
+                    SlotFSM.picking_start_hour.state,
+                    SlotFSM.picking_start_minute.state,
+                }:
+                    hour, minute = quick_start_time(selected)
+                else:
+                    hour, minute = quick_end_time(
+                        selected,
+                        int(data["start_hour"]),
+                        int(data["start_minute"]),
+                    )
+            except (KeyError, TypeError, ValueError):
+                await callback.answer(
+                    _tr(lang, "time_unavailable"),
+                    show_alert=True,
+                )
+                return
+
+            if current in {
+                SlotFSM.picking_start_hour.state,
+                SlotFSM.picking_start_minute.state,
+            }:
+                await state.update_data(start_hour=hour, start_minute=minute)
+                await _render_end_hour(
+                    callback,
+                    state,
+                    await state.get_data(),
+                )
+            else:
+                await state.update_data(end_hour=hour, end_minute=minute)
+                await _finish_wizard(
+                    callback,
+                    state,
+                    await state.get_data(),
+                )
+                return
+            await callback.answer()
+            return
+
+        if callback_data.act == "sh" and callback_data.val not in range(24):
+            await callback.answer(_tr(lang, "time_unavailable"), show_alert=True)
+            return
+        if callback_data.act == "eh" and callback_data.val not in range(25):
             await callback.answer(_tr(lang, "time_unavailable"), show_alert=True)
             return
         if callback_data.act in {"sm", "em"} and callback_data.val not in {0, 15, 30, 45}:

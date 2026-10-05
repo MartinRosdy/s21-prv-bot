@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator, Optional
 
 import aiosqlite
 
+from bot.core.utils import is_interval_active
 from bot.database.models import (
     DEFAULT_LANGUAGE,
     REVIEW_EVENT_TYPES,
@@ -415,6 +416,8 @@ class Database:
         evaluated_count = 0
         for event in events:
             if event.type not in REVIEW_EVENT_TYPES:
+                continue
+            if not is_interval_active(event.start_time, event.end_time):
                 continue
             if event.effective_role == ROLE_EVALUATED:
                 evaluated_count += 1

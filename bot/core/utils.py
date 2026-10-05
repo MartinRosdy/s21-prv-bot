@@ -141,6 +141,23 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def is_interval_active(
+    start: str | datetime,
+    end: Optional[str | datetime],
+    *,
+    now: Optional[datetime] = None,
+) -> bool:
+    """An interval is active until its end; fall back to start if end is absent."""
+    current = now or utc_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    boundary = end if end is not None else start
+    try:
+        return parse_iso_utc(boundary) > current.astimezone(UTC)
+    except (TypeError, ValueError):
+        return False
+
+
 def utc_iso(dt: datetime | None = None) -> str:
     """
     Serialize a datetime as ISO 8601 UTC with millisecond precision.

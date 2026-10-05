@@ -1,6 +1,7 @@
 """Tests for scheduler notification text generation (4 triggers, both roles)."""
 
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 from bot.database.models import (
     EVENT_TYPE_PEER_REVIEW,
@@ -18,8 +19,8 @@ from bot.services.scheduler import (
 )
 
 
-class TestSchedulerNotifications(unittest.TestCase):
-    def test_trigger_1_instant_booked_evaluator(self):
+class TestSchedulerNotifications(unittest.IsolatedAsyncioTestCase):
+    async def test_trigger_1_instant_booked_evaluator(self):
         text = _build_booked_instant_text(
             role=ROLE_EVALUATOR,
             peer_raw="Peer_Student",
@@ -32,7 +33,7 @@ class TestSchedulerNotifications(unittest.TestCase):
         self.assertIn("<code>peer_student</code>", text)
         self.assertIn("🌐 Онлайн", text)
 
-    def test_trigger_1_instant_booked_evaluated(self):
+    async def test_trigger_1_instant_booked_evaluated(self):
         text = _build_booked_instant_text(
             role=ROLE_EVALUATED,
             peer_raw="peer_checker",
@@ -45,7 +46,7 @@ class TestSchedulerNotifications(unittest.TestCase):
         self.assertIn("<code>peer_checker</code>", text)
         self.assertIn("🏢 Офлайн", text)
 
-    def test_trigger_2_t15_evaluator_and_evaluated(self):
+    async def test_trigger_2_t15_evaluator_and_evaluated(self):
         scheduler = PeerReviewScheduler(
             bot=None,  # type: ignore
             db=None,  # type: ignore
@@ -86,7 +87,7 @@ class TestSchedulerNotifications(unittest.TestCase):
         self.assertIn("Твой проверяющий: <code>checker1</code>", t15_text_eval)
         self.assertIn("🏢 Офлайн", t15_text_eval)
 
-    def test_trigger_3_t2_and_trigger_4_t0(self):
+    async def test_trigger_3_t2_and_trigger_4_t0(self):
         scheduler = PeerReviewScheduler(
             bot=None,  # type: ignore
             db=None,  # type: ignore
@@ -163,6 +164,35 @@ class TestBookingNotificationGuard(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(await scheduler._notify_booking_once(100, event, "old"))
         db.update_event_status.assert_awaited_once_with(11, "COMPLETED")
+        bot.send_message.assert_not_awaited()
+
+    async def test_ongoing_booking_is_not_hidden_or_completed(self):
+        db = AsyncMock()
+        bot = AsyncMock()
+        scheduler = PeerReviewScheduler(
+            bot=bot,
+            db=db,
+            crypto=None,  # type: ignore
+            api=None,  # type: ignore
+        )
+        event = TrackedEvent(
+            id=14,
+            user_id=100,
+            s21_event_id="ongoing",
+            type=EVENT_TYPE_PEER_REVIEW,
+            status=STATUS_BOOKED,
+            start_time="2020-10-05T07:00:00.000Z",
+            end_time="2999-10-05T18:00:00.000Z",
+        )
+        now = datetime(2026, 10, 5, 13, 24, tzinfo=timezone.utc)
+
+        self.assertFalse(scheduler._starts_in_future(event))
+        self.assertTrue(scheduler._ends_in_future(event, now=now))
+
+        # The start has passed, so no late booking alert is sent; the row must
+        # nevertheless stay BOOKED and visible until its end.
+        self.assertFalse(await scheduler._notify_booking_once(100, event, "late"))
+        db.update_event_status.assert_not_awaited()
         bot.send_message.assert_not_awaited()
 
     async def test_stale_reminder_for_open_slot_is_skipped(self):

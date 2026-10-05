@@ -35,8 +35,8 @@ class SlotWizardCB(CallbackData, prefix="sw"):
     """
     Compact wizard callbacks.
 
-    ``act``: date | sh | sm | eh | em | disabled | back | cancel
-    ``val``: day offset (0..6), hour (0..23), minute (0/15/30/45)
+    ``act``: date | sh | sm | eh | em | now | disabled | back | cancel
+    ``val``: day offset (0..6), hour (0..24), minute (0/15/30/45)
     """
 
     act: str
@@ -79,6 +79,7 @@ _LABELS = {
         "make_online": "🌐 Switch to Online",
         "time_unavailable": "Time unavailable",
         "status_free": "⏳ Free",
+        "select_now": "🕒 Select current time",
     },
     LANG_RU: {
         "create_slot": "➕ Создать слот",
@@ -94,6 +95,7 @@ _LABELS = {
         "make_online": "🌐 Переключить на Онлайн",
         "time_unavailable": "Время недоступно",
         "status_free": "⏳ Свободен",
+        "select_now": "🕒 Выбрать текущее время",
     },
     LANG_UZ: {
         "create_slot": "➕ Slot yaratish",
@@ -109,6 +111,7 @@ _LABELS = {
         "make_online": "🌐 Onlinega o‘tkazish",
         "time_unavailable": "Vaqt mavjud emas",
         "status_free": "⏳ Bo‘sh",
+        "select_now": "🕒 Joriy vaqtni tanlash",
     },
 }
 
@@ -373,10 +376,24 @@ def _has_valid_end_in_hour(
     start_minute: int,
 ) -> bool:
     """Whether an end-hour contains at least one valid 30-minute endpoint."""
+    minutes = (0,) if end_hour == 24 else (0, 15, 30, 45)
     return any(
         _duration_minutes(start_hour, start_minute, end_hour, minute)
         >= MIN_SLOT_DURATION_MINUTES
-        for minute in (0, 15, 30, 45)
+        for minute in minutes
+    )
+
+
+def _append_now_button(
+    builder: InlineKeyboardBuilder,
+    language: str | None,
+) -> None:
+    """Append the quick-time action at the bottom of a time keyboard."""
+    builder.row(
+        InlineKeyboardButton(
+            text=_t(language, "select_now"),
+            callback_data=SlotWizardCB(act="now").pack(),
+        )
     )
 
 
@@ -390,7 +407,7 @@ def build_hour_picker_kb(
     start_minute: Optional[int] = None,
 ) -> InlineKeyboardMarkup:
     """
-    Step 2 / 4: hours 0–23 in a 4-column grid.
+    Step 2 / 4: start hours 0–23; end hours also include next-day 00:00.
 
     Time guards:
     For today (day_offset == 0), if all 4 minutes of an hour fail the 15-min rule
@@ -401,14 +418,15 @@ def build_hour_picker_kb(
     buttons: list[InlineKeyboardButton] = []
     now_local = utc_now().astimezone(TASHKENT_TZ)
 
-    for hour in range(24):
+    hours = range(25) if which == "eh" else range(24)
+    for hour in hours:
         is_valid = True
 
         if which == "sh" and day_offset == 0:
             # Start hour is valid if at least one quarter hour is valid.
             is_valid = any(
                 _is_slot_time_valid_today(hour, m, now_local)
-                and _duration_minutes(hour, m, 23, 45)
+                and _duration_minutes(hour, m, 24, 0)
                 >= MIN_SLOT_DURATION_MINUTES
                 for m in (0, 15, 30, 45)
             )
@@ -421,7 +439,7 @@ def build_hour_picker_kb(
 
         if is_valid:
             label = _mark_current(
-                str(hour),
+                "00" if hour == 24 else str(hour),
                 is_current=highlight_hour is not None and hour == highlight_hour,
             )
             cb = SlotWizardCB(act=which, val=hour).pack()
@@ -434,6 +452,7 @@ def build_hour_picker_kb(
     for i in range(0, len(buttons), 4):
         builder.row(*buttons[i : i + 4])
     _append_nav(builder, language=language, with_back=True)
+    _append_now_button(builder, language)
     return builder.as_markup()
 
 
@@ -466,15 +485,17 @@ def build_minute_picker_kb(
                 hour, minute, now_local
             ):
                 is_valid = False
-            # The wizard creates same-day slots; leave room for a 30-min end.
+            # Midnight belongs to the following day and is a valid end.
             if (
-                _duration_minutes(hour, minute, 23, 45)
+                _duration_minutes(hour, minute, 24, 0)
                 < MIN_SLOT_DURATION_MINUTES
             ):
                 is_valid = False
         elif which == "em" and start_hour is not None:
             # End values shorter than 30 minutes are rendered as bullets.
-            if _duration_minutes(
+            if hour == 24 and minute != 0:
+                is_valid = False
+            elif _duration_minutes(
                 start_hour,
                 start_minute or 0,
                 hour,
@@ -496,7 +517,85 @@ def build_minute_picker_kb(
 
     builder.row(*buttons)
     _append_nav(builder, language=language, with_back=True)
+    _append_now_button(builder, language)
     return builder.as_markup()
+
+
+def _ceil_to_quarter(value: datetime) -> datetime:
+    """Round an aware datetime up to the next 15-minute grid point."""
+    value = value.replace(microsecond=0)
+    remainder = value.minute % 15
+    if remainder == 0 and value.second == 0:
+        return value
+    minutes = 15 - remainder if remainder else 15
+    return value.replace(second=0) + timedelta(minutes=minutes)
+
+
+def quick_start_time(
+    selected_date: date,
+    *,
+    now: Optional[datetime] = None,
+) -> tuple[int, int]:
+    """Return the nearest allowed start grid time for the selected date."""
+    current = (now or utc_now()).astimezone(TASHKENT_TZ)
+    if selected_date < current.date():
+        raise ValueError("selected date is in the past")
+    candidate = datetime(
+        selected_date.year,
+        selected_date.month,
+        selected_date.day,
+        current.hour,
+        current.minute,
+        current.second,
+        tzinfo=TASHKENT_TZ,
+    )
+    if selected_date == current.date():
+        candidate += timedelta(minutes=MIN_BOOKING_LEAD_MINUTES)
+    candidate = _ceil_to_quarter(candidate)
+    if candidate.date() != selected_date:
+        raise ValueError("no valid start time remains on selected date")
+    return candidate.hour, candidate.minute
+
+
+def quick_end_time(
+    selected_date: date,
+    start_hour: int,
+    start_minute: int,
+    *,
+    now: Optional[datetime] = None,
+) -> tuple[int, int]:
+    """Return a grid-aligned end, never earlier than start + 30 minutes."""
+    current = (now or utc_now()).astimezone(TASHKENT_TZ)
+    clock = datetime(
+        selected_date.year,
+        selected_date.month,
+        selected_date.day,
+        current.hour,
+        current.minute,
+        current.second,
+        tzinfo=TASHKENT_TZ,
+    )
+    start = datetime(
+        selected_date.year,
+        selected_date.month,
+        selected_date.day,
+        start_hour,
+        start_minute,
+        tzinfo=TASHKENT_TZ,
+    )
+    candidate = max(
+        _ceil_to_quarter(clock),
+        start + timedelta(minutes=MIN_SLOT_DURATION_MINUTES),
+    )
+    if candidate.date() == selected_date:
+        return candidate.hour, candidate.minute
+    if (
+        candidate.date() == selected_date + timedelta(days=1)
+        and candidate.hour == 0
+        and candidate.minute == 0
+    ):
+        return 24, 0
+    raise ValueError("no valid end time remains on selected date")
 
 
 def wizard_date_label(day_offset: int, language: str | None = None) -> str:
@@ -532,10 +631,12 @@ def compose_slot_datetimes(
     """Build timezone-aware UTC datetimes from wizard selections (Tashkent local)."""
     if day_offset not in range(0, 7):
         raise ValueError("day_offset must be between 0 and 6")
-    if start_hour not in range(24) or end_hour not in range(24):
-        raise ValueError("slot hours must be between 0 and 23")
+    if start_hour not in range(24) or end_hour not in range(25):
+        raise ValueError("start hour must be 0..23 and end hour 0..24")
     if start_minute not in {0, 15, 30, 45} or end_minute not in {0, 15, 30, 45}:
         raise ValueError("slot minutes must use the 15-minute grid")
+    if end_hour == 24 and end_minute != 0:
+        raise ValueError("hour 24 supports only 00 minutes")
     today = utc_now().astimezone(TASHKENT_TZ).date()
     base = selected_date or today + timedelta(days=day_offset)
     if not today <= base <= today + timedelta(days=6):
@@ -548,14 +649,25 @@ def compose_slot_datetimes(
         start_minute,
         tzinfo=TASHKENT_TZ,
     )
-    local_end = datetime(
-        base.year,
-        base.month,
-        base.day,
-        end_hour,
-        end_minute,
-        tzinfo=TASHKENT_TZ,
-    )
+    if end_hour == 24:
+        next_day = base + timedelta(days=1)
+        local_end = datetime(
+            next_day.year,
+            next_day.month,
+            next_day.day,
+            0,
+            0,
+            tzinfo=TASHKENT_TZ,
+        )
+    else:
+        local_end = datetime(
+            base.year,
+            base.month,
+            base.day,
+            end_hour,
+            end_minute,
+            tzinfo=TASHKENT_TZ,
+        )
     if local_end <= local_start:
         raise ValueError("slot end must be later than slot start")
     if local_end - local_start < timedelta(minutes=MIN_SLOT_DURATION_MINUTES):

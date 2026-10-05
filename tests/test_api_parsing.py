@@ -1,7 +1,8 @@
 """Tests for API calendar parsing and event filtering."""
 
 import unittest
-from unittest.mock import AsyncMock
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 from bot.services.s21_api import S21ApiClient
 from bot.database.models import EVENT_TYPE_SLOT, EVENT_TYPE_PEER_REVIEW, STATUS_OPEN, STATUS_BOOKED
 
@@ -95,6 +96,29 @@ class TestApiParsing(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0].data["event_slot_id"], "1010")
         self.assertNotIn("is_online", items[0].data)
 
+    async def test_calendar_window_includes_already_started_events(self):
+        response = MagicMock(status=200)
+        response.text = AsyncMock(return_value='{"data": {}}')
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=response)
+        context.__aexit__ = AsyncMock(return_value=None)
+        session = MagicMock()
+        session.post.return_value = context
+        api = S21ApiClient(
+            session,
+            auth_url="https://auth.example.com",
+            graphql_url="https://api.example.com",
+            school_id="dummy-school-id",
+        )
+        now = datetime(2026, 10, 5, 13, 24, tzinfo=timezone.utc)
+
+        with patch("bot.services.s21_api.utc_now", return_value=now):
+            await api._post_calendar("token", days_ahead=7)
+
+        payload = session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["variables"]["from"], "2026-10-04T13:24:00.000Z")
+        self.assertEqual(payload["variables"]["to"], "2026-10-12T13:24:00.000Z")
+
     async def test_create_slot_uses_supported_payload(self):
         post = AsyncMock(return_value={"student": {"addEventToTimetable": {"id": "1"}}})
         self.api._post_mutation = post
@@ -107,7 +131,8 @@ class TestApiParsing(unittest.IsolatedAsyncioTestCase):
 
         kwargs = post.await_args.kwargs
         self.assertEqual(set(kwargs["variables"]), {"start", "end"})
-        self.assertNotIn("isOnline", kwargs["query"])
+        mutation = kwargs["query"].split("fragment CalendarEvent", 1)[0]
+        self.assertNotIn("isOnline", mutation)
 
     async def test_update_slot_uses_supported_payload(self):
         post = AsyncMock(return_value={"student": {"changeEventSlot": {"id": "1"}}})
@@ -123,7 +148,8 @@ class TestApiParsing(unittest.IsolatedAsyncioTestCase):
         kwargs = post.await_args.kwargs
         self.assertEqual(kwargs["variables"]["id"], 1010)
         self.assertEqual(set(kwargs["variables"]), {"id", "start", "end"})
-        self.assertNotIn("isOnline", kwargs["query"])
+        mutation = kwargs["query"].split("fragment CalendarEvent", 1)[0]
+        self.assertNotIn("isOnline", mutation)
 
     async def test_create_slot_rejects_empty_success_response(self):
         from bot.services.s21_api import S21ApiError
