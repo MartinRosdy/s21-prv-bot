@@ -10,6 +10,7 @@ from bot.database.models import (
     ROLE_EVALUATOR,
     STATUS_BOOKED,
     STATUS_OPEN,
+    CalendarSnapshotItem,
     TrackedEvent,
     User,
 )
@@ -115,6 +116,77 @@ class TestSchedulerNotifications(unittest.IsolatedAsyncioTestCase):
 
 
 class TestBookingNotificationGuard(unittest.IsolatedAsyncioTestCase):
+    async def test_reconcile_matches_booking_source_to_existing_slot_alias(self):
+        db = AsyncMock()
+        existing = TrackedEvent(
+            id=20,
+            user_id=100,
+            s21_event_id="calendar-event-old",
+            type=EVENT_TYPE_SLOT,
+            status=STATUS_OPEN,
+            start_time="2999-10-02T19:00:00.000Z",
+            end_time="2999-10-02T20:00:00.000Z",
+            data={"event_slot_id": "slot-20"},
+            role=ROLE_EVALUATOR,
+        )
+        db.get_events = AsyncMock(side_effect=[[existing], [existing], [existing]])
+        bot = AsyncMock()
+        scheduler = PeerReviewScheduler(
+            bot=bot,
+            db=db,
+            crypto=None,  # type: ignore
+            api=None,  # type: ignore
+        )
+        scheduler._apply_item = AsyncMock()
+        incoming = CalendarSnapshotItem(
+            s21_event_id="booking:book-20",
+            type=EVENT_TYPE_PEER_REVIEW,
+            status=STATUS_BOOKED,
+            start_time="2999-10-02T19:00:00.000Z",
+            end_time="2999-10-02T19:30:00.000Z",
+            role=ROLE_EVALUATOR,
+            data={
+                "event_slot_id": "slot-20",
+                "booking_id": "book-20",
+                "peer_login": "peer20",
+            },
+        )
+        user = User(100, "mylogin", "encrypted")
+
+        await scheduler._reconcile(user, [incoming])
+
+        self.assertEqual(incoming.s21_event_id, "calendar-event-old")
+        scheduler._apply_item.assert_awaited_once_with(user, incoming, existing)
+        db.update_event_status.assert_not_awaited()
+
+    async def test_partial_snapshot_never_cancels_unseen_booking(self):
+        db = AsyncMock()
+        existing = TrackedEvent(
+            id=21,
+            user_id=100,
+            s21_event_id="known-booking",
+            type=EVENT_TYPE_PEER_REVIEW,
+            status=STATUS_BOOKED,
+            start_time="2999-10-02T19:00:00.000Z",
+            end_time="2999-10-02T19:30:00.000Z",
+            role=ROLE_EVALUATED,
+        )
+        db.get_events = AsyncMock(side_effect=[[existing], [existing], [existing]])
+        scheduler = PeerReviewScheduler(
+            bot=AsyncMock(),
+            db=db,
+            crypto=None,  # type: ignore
+            api=None,  # type: ignore
+        )
+
+        await scheduler._reconcile(
+            User(100, "mylogin", "encrypted"),
+            [],
+            authoritative=False,
+        )
+
+        db.update_event_status.assert_not_awaited()
+
     async def test_future_booking_is_claimed_only_once(self):
         db = AsyncMock()
         db.claim_event_notification = AsyncMock(side_effect=[True, False])

@@ -111,3 +111,12 @@ class CalendarSnapshotItem:
     end_time: Optional[str] = None
     data: dict[str, Any] = field(default_factory=dict)
     role: Optional[str] = None
+
+
+@dataclass
+class CalendarFetchResult:
+    """Merged calendar data plus whether every GraphQL source succeeded."""
+
+    items: list[CalendarSnapshotItem] = field(default_factory=list)
+    complete: bool = True
+    failed_sources: tuple[str, ...] = ()

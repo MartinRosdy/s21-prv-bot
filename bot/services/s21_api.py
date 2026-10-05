@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Optional
 
 import aiohttp
 
-from bot.core.utils import utc_iso, utc_now
+from bot.core.utils import TASHKENT_TZ, utc_iso, utc_now
 from bot.database.models import (
     DEFAULT_ROLE,
     EVENT_TYPE_PEER_REVIEW,
@@ -20,6 +20,7 @@ from bot.database.models import (
     STATUS_BOOKED,
     STATUS_OPEN,
     TERMINAL_BOOKING_STATUSES,
+    CalendarFetchResult,
     CalendarSnapshotItem,
 )
 
@@ -30,12 +31,6 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
-)
-
-# Strict GraphQL URL — School 21 balancer validates operation query param.
-CALENDAR_OPERATION_URL = (
-    "https://platform.21-school.ru/services/graphql"
-    "?operation=calendarGetEvents"
 )
 
 # ---------------------------------------------------------------------------
@@ -93,6 +88,147 @@ CALENDAR_GET_EVENTS_QUERY = f"""query calendarGetEvents($from: DateTime!, $to: D
 }}
 
 {GRAPHQL_FRAGMENTS}"""
+
+CALENDAR_GET_MY_BOOKINGS_QUERY = """query calendarGetMyBookings($from: DateTime!, $to: DateTime!) {
+  student {
+    getMyCalendarBookings(from: $from, to: $to) {
+      ...CalendarReviewBooking
+      __typename
+    }
+    __typename
+  }
+}
+
+fragment CalendarReviewBooking on CalendarBooking {
+  id
+  answerId
+  eventSlotId
+  task {
+    id
+    goalId
+    goalName
+    studentTaskAdditionalAttributes { cookiesCount __typename }
+    assignmentType
+    __typename
+  }
+  eventSlot {
+    id
+    start
+    end
+    event { eventUserRole eventCode __typename }
+    school { shortName __typename }
+    __typename
+  }
+  verifierUser { ...CalendarReviewUser __typename }
+  verifiableInfo {
+    verifiableStudents { ...VerifiableStudentItem __typename }
+    team { name __typename }
+    __typename
+  }
+  bookingStatus
+  isOnline
+  vcLinkUrl
+  additionalChecklist {
+    filledChecklistId
+    filledChecklistStatusRecordingEnum
+    __typename
+  }
+  __typename
+}
+
+fragment CalendarReviewUser on User { id login __typename }
+fragment VerifiableStudentItem on VerifiableStudent {
+  userId login avatarUrl levelCode isTeamLead cookiesCount codeReviewPoints
+  school { shortName __typename }
+  __typename
+}"""
+
+CALENDAR_GET_MY_REVIEWS_QUERY = """query calendarGetMyReviews($to: DateTime, $limit: Int) {
+  student {
+    getMyUpcomingBookings(to: $to, limit: $limit) {
+      ...Review
+      __typename
+    }
+    __typename
+  }
+}
+
+fragment Review on CalendarBooking {
+  id
+  answerId
+  eventSlot { id start end __typename }
+  task {
+    id
+    title
+    assignmentType
+    goalId
+    goalName
+    studentTaskAdditionalAttributes { cookiesCount __typename }
+    __typename
+  }
+  verifierUser { ...UserInBooking __typename }
+  verifiableStudent {
+    id
+    user { ...UserInBooking __typename }
+    __typename
+  }
+  team { ...ProjectTeamMembers __typename }
+  bookingStatus
+  isOnline
+  vcLinkUrl
+  __typename
+}
+
+fragment UserInBooking on User {
+  id
+  login
+  avatarUrl
+  userExperience { level { id range { levelCode __typename } __typename } __typename }
+  __typename
+}
+fragment ProjectTeamMembers on ProjectTeamMembers {
+  id
+  teamLead { ...ProjectTeamMember __typename }
+  members { ...ProjectTeamMember __typename }
+  invitedUsers { ...ProjectTeamMember __typename }
+  teamName
+  teamStatus
+  minTeamMemberCount
+  maxTeamMemberCount
+  __typename
+}
+fragment ProjectTeamMember on User {
+  id avatarUrl login
+  userExperience {
+    level { id range { levelCode __typename } __typename }
+    cookiesCount
+    codeReviewPoints
+    __typename
+  }
+  activeSchoolShortName
+  __typename
+}"""
+
+CALENDAR_GET_MY_ACTUAL_P2P_REQUESTS_QUERY = """query calendarGetMyActualP2pRequests($from: DateTime!, $to: DateTime!) {
+  student {
+    getMyActualP2pRequests(from: $from, to: $to) {
+      ...CalendarP2pRequest
+      __typename
+    }
+    __typename
+  }
+}
+
+fragment CalendarP2pRequest on P2pRequest {
+  p2pRequestId
+  startTime
+  endTime
+  isOnline
+  goalId
+  goalName
+  studentAnswerId
+  __typename
+}"""
 
 
 class S21AuthError(Exception):
@@ -208,31 +344,153 @@ class S21ApiClient:
         access_token: str,
         *,
         days_ahead: int = 7,
-    ) -> Optional[list[CalendarSnapshotItem]]:
+        user_login: Optional[str] = None,
+    ) -> CalendarFetchResult:
         """
-        Fetch calendar via strict ``calendarGetEvents`` operation.
+        Fetch and merge every calendar source used by the School 21 web UI.
 
-        Returns normalized snapshot items, or ``None`` on transient network
-        failures so the poller can skip the cycle without crashing.
+        ``calendarGetEvents`` is not authoritative for assigned reviews: some
+        evaluator/evaluatee bookings only appear in the dedicated student
+        queries. Successful sources are still ingested after a partial outage,
+        while ``complete=False`` tells the scheduler not to infer cancellations
+        from anything absent in that partial result.
         """
-        body = await self._post_calendar(access_token, days_ahead=days_ahead)
-        if body is None:
-            return None
-
-        if body.get("errors"):
-            messages = "; ".join(
-                str(e.get("message", e)) for e in body["errors"]
-            )
-            raise S21ApiError(f"GraphQL errors: {messages}")
-
-        raw_events = self._extract_events_list(body.get("data") or {})
-        logger.info("Calendar returned %s raw event(s)", len(raw_events))
+        window = self._calendar_window(days_ahead)
+        requests = (
+            self._post_query(
+                access_token,
+                operation_name="calendarGetEvents",
+                variables=window,
+                query=CALENDAR_GET_EVENTS_QUERY,
+            ),
+            self._post_query(
+                access_token,
+                operation_name="calendarGetMyBookings",
+                variables=window,
+                query=CALENDAR_GET_MY_BOOKINGS_QUERY,
+            ),
+            self._post_query(
+                access_token,
+                operation_name="calendarGetMyReviews",
+                variables={"limit": 30},
+                query=CALENDAR_GET_MY_REVIEWS_QUERY,
+            ),
+            self._post_query(
+                access_token,
+                operation_name="calendarGetMyActualP2pRequests",
+                variables=window,
+                query=CALENDAR_GET_MY_ACTUAL_P2P_REQUESTS_QUERY,
+            ),
+        )
+        operation_names = (
+            "calendarGetEvents",
+            "calendarGetMyBookings",
+            "calendarGetMyReviews",
+            "calendarGetMyActualP2pRequests",
+        )
+        results = await asyncio.gather(*requests, return_exceptions=True)
+        bodies: list[Optional[dict[str, Any]]] = []
+        failed_sources: list[str] = []
+        for operation_name, result in zip(operation_names, results):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "Calendar source %s failed: %s",
+                    operation_name,
+                    result,
+                )
+                bodies.append(None)
+                failed_sources.append(operation_name)
+            elif result is None:
+                bodies.append(None)
+                failed_sources.append(operation_name)
+            else:
+                bodies.append(result)
 
         items: list[CalendarSnapshotItem] = []
+        events_body, bookings_body, reviews_body, p2p_body = bodies
+
+        raw_events = self._extract_events_list(
+            events_body.get("data") or {} if events_body else {}
+        )
         for raw in raw_events:
             items.extend(self._parse_calendar_event(raw))
-        logger.info("Normalized to %s snapshot item(s)", len(items))
-        return items
+
+        raw_bookings = self._extract_student_list(
+            bookings_body.get("data") or {} if bookings_body else {},
+            "getMyCalendarBookings",
+        )
+        for booking in raw_bookings:
+            item = self._parse_standalone_booking(
+                booking,
+                user_login=user_login,
+                source="calendarGetMyBookings",
+            )
+            if item is not None:
+                items.append(item)
+
+        raw_reviews = self._extract_student_list(
+            reviews_body.get("data") or {} if reviews_body else {},
+            "getMyUpcomingBookings",
+        )
+        for booking in raw_reviews:
+            item = self._parse_standalone_booking(
+                booking,
+                user_login=user_login,
+                source="calendarGetMyReviews",
+            )
+            if item is not None:
+                items.append(item)
+
+        raw_requests = self._extract_student_list(
+            p2p_body.get("data") or {} if p2p_body else {},
+            "getMyActualP2pRequests",
+        )
+        for request in raw_requests:
+            item = self._parse_p2p_request(request)
+            if item is not None:
+                items.append(item)
+
+        merged = [
+            item
+            for item in self._merge_snapshot_items(items)
+            if item.type != EVENT_TYPE_PEER_REVIEW
+            or bool((item.data or {}).get("has_concrete_booking"))
+        ]
+        logger.info(
+            "Calendar sources events=%s bookings=%s reviews=%s p2p=%s; "
+            "normalized=%s merged=%s",
+            len(raw_events),
+            len(raw_bookings),
+            len(raw_reviews),
+            len(raw_requests),
+            len(items),
+            len(merged),
+        )
+        return CalendarFetchResult(
+            items=merged,
+            complete=not failed_sources,
+            failed_sources=tuple(failed_sources),
+        )
+
+    @staticmethod
+    def _iso_millis(value: datetime) -> str:
+        """Serialize an aware datetime without losing the platform's .999 bound."""
+        utc_value = value.astimezone(timezone.utc)
+        millis = utc_value.microsecond // 1000
+        return f"{utc_value:%Y-%m-%dT%H:%M:%S}.{millis:03d}Z"
+
+    @classmethod
+    def _calendar_window(cls, days_ahead: int) -> dict[str, str]:
+        """Web-compatible range: local midnight through the next N days."""
+        if days_ahead < 1:
+            raise ValueError("days_ahead must be positive")
+        local_today = utc_now().astimezone(TASHKENT_TZ).date()
+        local_start = datetime.combine(local_today, time.min, tzinfo=TASHKENT_TZ)
+        local_end = local_start + timedelta(days=days_ahead) - timedelta(milliseconds=1)
+        return {
+            "from": cls._iso_millis(local_start),
+            "to": cls._iso_millis(local_end),
+        }
 
     async def _post_calendar(
         self,
@@ -244,17 +502,27 @@ class S21ApiClient:
         POST calendarGetEvents. Network blips → WARNING + ``None``.
         HTTP / JSON protocol errors → ``S21ApiError``.
         """
-        now = utc_now()
-        variables = {
-            # Include already-started events.  The API window is start-based,
-            # so using ``now`` here made long, still-active slots disappear.
-            "from": utc_iso(now - timedelta(days=1)),
-            "to": utc_iso(now + timedelta(days=days_ahead)),
-        }
+        variables = self._calendar_window(days_ahead)
+        return await self._post_query(
+            access_token,
+            operation_name="calendarGetEvents",
+            variables=variables,
+            query=CALENDAR_GET_EVENTS_QUERY,
+        )
+
+    async def _post_query(
+        self,
+        access_token: str,
+        *,
+        operation_name: str,
+        variables: dict[str, Any],
+        query: str,
+    ) -> Optional[dict[str, Any]]:
+        """Execute one read query; return ``None`` on transport failure."""
         payload = {
-            "operationName": "calendarGetEvents",
+            "operationName": operation_name,
             "variables": variables,
-            "query": CALENDAR_GET_EVENTS_QUERY,
+            "query": query,
         }
         headers = {
             "Authorization": f"Bearer {access_token}",
@@ -264,14 +532,14 @@ class S21ApiClient:
         }
 
         logger.info(
-            "GraphQL calendarGetEvents from=%s to=%s",
-            variables["from"],
-            variables["to"],
+            "GraphQL query operation=%s variables=%s",
+            operation_name,
+            json.dumps(variables, ensure_ascii=False),
         )
 
         try:
             async with self._session.post(
-                CALENDAR_OPERATION_URL,
+                self._graphql_operation_url(operation_name),
                 json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=45),
@@ -289,11 +557,23 @@ class S21ApiClient:
                     )
         except _NETWORK_ERRORS as exc:
             # Balancer blips, timeouts, ClientOSError reset-by-peer, etc.
-            logger.warning("Calendar request network error: %s", exc)
+            logger.warning("GraphQL query %s network error: %s", operation_name, exc)
             return None
 
         if not isinstance(body, dict):
-            raise S21ApiError("GraphQL response is not a JSON object")
+            raise S21ApiError(
+                f"GraphQL {operation_name} response is not a JSON object"
+            )
+        if body.get("errors"):
+            messages = "; ".join(
+                str(
+                    error.get("message", error)
+                    if isinstance(error, dict)
+                    else error
+                )
+                for error in body["errors"]
+            )
+            raise S21ApiError(f"GraphQL {operation_name} errors: {messages}")
         return body
 
     # -------------------------------------------------------------- mutations
@@ -500,6 +780,20 @@ class S21ApiClient:
             return data["calendarGetEvents"]
         return []
 
+    @staticmethod
+    def _extract_student_list(
+        data: dict[str, Any],
+        field: str,
+    ) -> list[dict[str, Any]]:
+        """Extract a list from the ``student`` GraphQL namespace."""
+        student = data.get("student") or {}
+        if not isinstance(student, dict):
+            return []
+        value = student.get(field)
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
     @classmethod
     def _is_non_review_event(cls, raw: dict[str, Any]) -> bool:
         """
@@ -595,6 +889,7 @@ class S21ApiClient:
                             "event_slot_id": event_slot_id,
                             "role": role,
                             "peer_login": None,
+                            "source": "calendarGetEvents",
                         },
                     )
                 )
@@ -607,6 +902,8 @@ class S21ApiClient:
         booking: dict[str, Any],
         *,
         event_id: str,
+        user_login: Optional[str] = None,
+        source: str = "calendarGetEvents",
     ) -> Optional[CalendarSnapshotItem]:
         booking_id = str(booking.get("id") or "").strip()
         slot = booking.get("eventSlot") or {}
@@ -622,7 +919,10 @@ class S21ApiClient:
             or raw.get("end")
         )
 
-        role, peer_login = self._extract_role_and_peer(booking)
+        role, peer_login = self._extract_role_and_peer(
+            booking,
+            user_login=user_login,
+        )
         is_online = bool(booking.get("isOnline", False))
         goal_name = None
         task = booking.get("task")
@@ -652,14 +952,166 @@ class S21ApiClient:
                 "goal_name": goal_name,
                 "name": goal_name or "Пир-Ревью",
                 "event_slot_id": event_slot_id,
+                "answer_id": (
+                    str(booking["answerId"])
+                    if booking.get("answerId") is not None
+                    else None
+                ),
+                "source": source,
+                "has_concrete_booking": True,
             },
         )
+
+    def _parse_standalone_booking(
+        self,
+        booking: dict[str, Any],
+        *,
+        user_login: Optional[str],
+        source: str,
+    ) -> Optional[CalendarSnapshotItem]:
+        """Normalize a booking returned outside ``CalendarEvent``."""
+        if not self._is_active_booking(booking):
+            return None
+        booking_id = str(booking.get("id") or "").strip()
+        slot = booking.get("eventSlot") or {}
+        slot_id = ""
+        if isinstance(slot, dict) and slot.get("id") is not None:
+            slot_id = str(slot["id"]).strip()
+        if not booking_id and not slot_id:
+            return None
+        stable_id = f"booking:{booking_id}" if booking_id else f"slot:{slot_id}"
+        return self._parse_booking(
+            {},
+            booking,
+            event_id=stable_id,
+            user_login=user_login,
+            source=source,
+        )
+
+    @staticmethod
+    def _parse_p2p_request(
+        request: dict[str, Any],
+    ) -> Optional[CalendarSnapshotItem]:
+        """Normalize the evaluated student's active P2P request fallback."""
+        request_id = str(request.get("p2pRequestId") or "").strip()
+        start = request.get("startTime")
+        if not request_id or not start:
+            return None
+        answer_id = request.get("studentAnswerId")
+        goal_name = request.get("goalName")
+        return CalendarSnapshotItem(
+            s21_event_id=f"p2p:{request_id}",
+            type=EVENT_TYPE_PEER_REVIEW,
+            status=STATUS_BOOKED,
+            start_time=str(start),
+            end_time=(
+                str(request["endTime"])
+                if request.get("endTime") is not None
+                else None
+            ),
+            role=ROLE_EVALUATED,
+            data={
+                "peer_login": None,
+                "role": ROLE_EVALUATED,
+                "is_online": bool(request.get("isOnline", False)),
+                "booking_id": None,
+                "booking_status": "ACTUAL_P2P_REQUEST",
+                "vc_link": None,
+                "goal_name": goal_name,
+                "name": goal_name or "Пир-Ревью",
+                "event_slot_id": None,
+                "answer_id": str(answer_id) if answer_id is not None else None,
+                "p2p_request_id": request_id,
+                "source": "calendarGetMyActualP2pRequests",
+                "has_concrete_booking": False,
+            },
+        )
+
+    @staticmethod
+    def _snapshot_keys(item: CalendarSnapshotItem) -> tuple[str, ...]:
+        """Cross-query identities ordered from strongest to weakest."""
+        data = item.data or {}
+        keys: list[str] = []
+        for prefix, value in (
+            ("answer", data.get("answer_id")),
+            ("slot", data.get("event_slot_id")),
+            ("booking", data.get("booking_id")),
+        ):
+            if value is not None and str(value).strip():
+                keys.append(f"{prefix}:{str(value).strip()}")
+        keys.append(f"event:{item.s21_event_id}")
+        return tuple(keys)
+
+    @staticmethod
+    def _merge_two_items(
+        current: CalendarSnapshotItem,
+        incoming: CalendarSnapshotItem,
+    ) -> CalendarSnapshotItem:
+        """Merge duplicate query rows while preserving the first stable id."""
+        current_data = dict(current.data or {})
+        incoming_data = dict(incoming.data or {})
+        current_score = sum(value not in (None, "", [], {}) for value in current_data.values())
+        incoming_score = sum(value not in (None, "", [], {}) for value in incoming_data.values())
+        preferred = incoming if incoming_score > current_score else current
+        secondary = current if preferred is incoming else incoming
+        merged_data = dict(secondary.data or {})
+        merged_data.update(
+            {
+                key: value
+                for key, value in (preferred.data or {}).items()
+                if value not in (None, "", [], {})
+            }
+        )
+        role = preferred.role or secondary.role
+        return CalendarSnapshotItem(
+            s21_event_id=current.s21_event_id,
+            type=(
+                EVENT_TYPE_PEER_REVIEW
+                if EVENT_TYPE_PEER_REVIEW in {current.type, incoming.type}
+                else preferred.type
+            ),
+            status=(
+                STATUS_BOOKED
+                if STATUS_BOOKED in {current.status, incoming.status}
+                else preferred.status
+            ),
+            start_time=preferred.start_time or secondary.start_time,
+            end_time=preferred.end_time or secondary.end_time,
+            role=role,
+            data=merged_data,
+        )
+
+    @classmethod
+    def _merge_snapshot_items(
+        cls,
+        items: list[CalendarSnapshotItem],
+    ) -> list[CalendarSnapshotItem]:
+        """Deduplicate CalendarEvent, booking, review, and P2P representations."""
+        merged: list[CalendarSnapshotItem] = []
+        key_to_index: dict[str, int] = {}
+        for item in items:
+            matching = {
+                key_to_index[key]
+                for key in cls._snapshot_keys(item)
+                if key in key_to_index
+            }
+            if not matching:
+                index = len(merged)
+                merged.append(item)
+            else:
+                index = min(matching)
+                merged[index] = cls._merge_two_items(merged[index], item)
+            for key in cls._snapshot_keys(merged[index]):
+                key_to_index[key] = index
+            for key in cls._snapshot_keys(item):
+                key_to_index[key] = index
+        return merged
 
     @staticmethod
     def _is_active_booking(booking: dict[str, Any]) -> bool:
         status = str(
             booking.get("bookingStatus") or booking.get("status") or ""
-        ).upper()
+        ).strip().upper()
         if not status:
             return True
         return status not in TERMINAL_BOOKING_STATUSES
@@ -748,6 +1200,16 @@ class S21ApiClient:
             return ""
         return str(event.get("eventUserRole") or "").upper()
 
+    @staticmethod
+    def _normalize_event_role(role_raw: str) -> Optional[str]:
+        """Map platform role enum variants to the bot's two stable roles."""
+        value = str(role_raw or "").strip().upper()
+        if value in {"EVALUATOR", "VERIFIER", "CHECKER"}:
+            return ROLE_EVALUATOR
+        if value in {"EVALUATED", "VERIFIABLE", "CHECKED", "STUDENT"}:
+            return ROLE_EVALUATED
+        return None
+
     @classmethod
     def _extract_open_slot_role(cls, raw: dict[str, Any]) -> str:
         """Role for an empty duty slot (defaults to evaluator)."""
@@ -755,16 +1217,17 @@ class S21ApiClient:
         if isinstance(slots, list):
             for slot in slots:
                 role_raw = cls._event_user_role(slot)
-                if role_raw == "EVALUATED":
-                    return ROLE_EVALUATED
-                if role_raw == "EVALUATOR":
-                    return ROLE_EVALUATOR
+                role = cls._normalize_event_role(role_raw)
+                if role is not None:
+                    return role
         return DEFAULT_ROLE
 
     @classmethod
     def _extract_role_and_peer(
         cls,
         booking: dict[str, Any],
+        *,
+        user_login: Optional[str] = None,
     ) -> tuple[str, Optional[str]]:
         """
         Resolve my role and the counterpart peer login.
@@ -780,29 +1243,63 @@ class S21ApiClient:
             if isinstance(event, dict):
                 role_raw = str(event.get("eventUserRole") or "").upper()
 
-        if role_raw == "EVALUATOR":
+        normalized_role = cls._normalize_event_role(role_raw)
+        if normalized_role == ROLE_EVALUATOR:
             return ROLE_EVALUATOR, cls._peer_from_verifiable(booking)
-        if role_raw == "EVALUATED":
+        if normalized_role == ROLE_EVALUATED:
             return ROLE_EVALUATED, cls._peer_from_verifier(booking)
 
+        # ``calendarGetMyReviews`` has no eventUserRole. Resolve it by
+        # comparing the authenticated login with both sides of the booking.
+        normalized_login = str(user_login or "").strip().lower()
+        verifier_login = cls._peer_from_verifier(booking)
+        evaluated_logins = cls._verifiable_logins(booking)
+        if normalized_login:
+            if verifier_login == normalized_login:
+                peer = next(
+                    (login for login in evaluated_logins if login != normalized_login),
+                    None,
+                )
+                return ROLE_EVALUATOR, peer
+            if normalized_login in evaluated_logins:
+                return ROLE_EVALUATED, verifier_login
+
         # Legacy / unknown role: best-effort peer detection.
-        peer = cls._peer_from_verifiable(booking) or cls._peer_from_verifier(
-            booking
-        )
+        peer = cls._peer_from_verifiable(booking) or verifier_login
         return DEFAULT_ROLE, peer
 
-    @staticmethod
-    def _peer_from_verifiable(booking: dict[str, Any]) -> Optional[str]:
+    @classmethod
+    def _verifiable_logins(cls, booking: dict[str, Any]) -> list[str]:
+        """Collect evaluatee logins from both booking response shapes."""
+        result: list[str] = []
         info = booking.get("verifiableInfo") or {}
-        if not isinstance(info, dict):
-            return None
-        students = info.get("verifiableStudents") or []
-        if not isinstance(students, list) or not students:
-            return None
-        first = students[0]
-        if isinstance(first, dict) and first.get("login"):
-            return str(first["login"]).strip().lower()
-        return None
+        if isinstance(info, dict):
+            students = info.get("verifiableStudents") or []
+            if isinstance(students, list):
+                for student in students:
+                    if isinstance(student, dict) and student.get("login"):
+                        result.append(str(student["login"]).strip().lower())
+
+        singular = booking.get("verifiableStudent") or {}
+        if isinstance(singular, dict):
+            user = singular.get("user") or {}
+            if isinstance(user, dict) and user.get("login"):
+                result.append(str(user["login"]).strip().lower())
+
+        team = booking.get("team") or {}
+        if isinstance(team, dict):
+            for key in ("teamLead", "members", "invitedUsers"):
+                value = team.get(key)
+                candidates = value if isinstance(value, list) else [value]
+                for candidate in candidates:
+                    if isinstance(candidate, dict) and candidate.get("login"):
+                        result.append(str(candidate["login"]).strip().lower())
+        return list(dict.fromkeys(result))
+
+    @classmethod
+    def _peer_from_verifiable(cls, booking: dict[str, Any]) -> Optional[str]:
+        logins = cls._verifiable_logins(booking)
+        return logins[0] if logins else None
 
     @staticmethod
     def _peer_from_verifier(booking: dict[str, Any]) -> Optional[str]:

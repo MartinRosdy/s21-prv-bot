@@ -142,6 +142,23 @@ def _resolve_role(item: CalendarSnapshotItem | TrackedEvent) -> str:
     return ROLE_EVALUATOR
 
 
+def _event_identity_keys(
+    item: CalendarSnapshotItem | TrackedEvent,
+) -> tuple[str, ...]:
+    """Stable aliases shared by the four calendar GraphQL representations."""
+    data = item.data or {}
+    keys: list[str] = []
+    for prefix, value in (
+        ("answer", data.get("answer_id")),
+        ("slot", data.get("event_slot_id")),
+        ("booking", data.get("booking_id")),
+    ):
+        if value is not None and str(value).strip():
+            keys.append(f"{prefix}:{str(value).strip()}")
+    keys.append(f"event:{item.s21_event_id}")
+    return tuple(keys)
+
+
 def _format_toggle_markup(
     event: TrackedEvent,
     language: str | None,
@@ -271,6 +288,7 @@ class PeerReviewScheduler:
     async def _process_user_locked(self, user: User) -> None:
         password: Optional[str] = None
         snapshot = None
+        snapshot_complete = False
         token: Optional[str] = None
 
         # Auth + calendarGetEvents share one semaphore slot (max 3 in flight).
@@ -302,7 +320,12 @@ class PeerReviewScheduler:
                 del password
 
             try:
-                snapshot = await self._api.fetch_calendar_events(token)
+                fetch_result = await self._api.fetch_calendar_events(
+                    token,
+                    user_login=user.s21_login,
+                )
+                snapshot = fetch_result.items
+                snapshot_complete = fetch_result.complete
             except S21ApiError as exc:
                 logger.warning(
                     "Calendar fetch failed for chat_id=%s: %s",
@@ -311,7 +334,7 @@ class PeerReviewScheduler:
                 )
                 return
 
-        # Transient network error — skip this cycle quietly.
+        # No source produced data. Preserve DB state and retry next cycle.
         if snapshot is None:
             logger.warning(
                 "Skipping reconcile for chat_id=%s (network blip)",
@@ -376,7 +399,10 @@ class PeerReviewScheduler:
                 # plan nor repeats already successful create operations.
                 async with self._api_semaphore:
                     try:
-                        refreshed = await self._api.fetch_calendar_events(token)
+                        refresh_result = await self._api.fetch_calendar_events(
+                            token,
+                            user_login=user.s21_login,
+                        )
                     except S21ApiError as exc:
                         logger.warning(
                             "Post-split calendar refresh failed for user %s: %s",
@@ -384,8 +410,8 @@ class PeerReviewScheduler:
                             exc,
                         )
                     else:
-                        if refreshed is not None:
-                            reconcile_snapshot = refreshed
+                        reconcile_snapshot = refresh_result.items
+                        snapshot_complete = refresh_result.complete
 
         current_user = await self._db.get_user(user.telegram_chat_id)
         if current_user is None or not current_user.is_linked:
@@ -394,12 +420,18 @@ class PeerReviewScheduler:
                 user.telegram_chat_id,
             )
             return
-        await self._reconcile(current_user, reconcile_snapshot)
+        await self._reconcile(
+            current_user,
+            reconcile_snapshot,
+            authoritative=snapshot_complete,
+        )
 
     async def _reconcile(
         self,
         user: User,
         snapshot: list[CalendarSnapshotItem],
+        *,
+        authoritative: bool = True,
     ) -> None:
         """Compare API snapshot with local peer-review rows and apply transitions."""
         user_id = user.telegram_chat_id
@@ -429,6 +461,26 @@ class PeerReviewScheduler:
             for s21_id, event in all_known.items()
             if event.status in {STATUS_OPEN, STATUS_BOOKED}
         }
+        # Preserve the DB identity chosen on the first observation. Dedicated
+        # GraphQL sources use booking ids while CalendarEvent uses event ids;
+        # eventSlotId/answerId bridge those representations and prevent a
+        # duplicate row (and a false cancellation) when a source appears later.
+        known_by_alias: dict[str, TrackedEvent] = {}
+        for event in all_known.values():
+            for key in _event_identity_keys(event):
+                known_by_alias[key] = event
+        for item in snapshot:
+            matched = next(
+                (
+                    known_by_alias[key]
+                    for key in _event_identity_keys(item)
+                    if key in known_by_alias
+                ),
+                None,
+            )
+            if matched is not None:
+                item.s21_event_id = matched.s21_event_id
+
         api_by_id = {item.s21_event_id: item for item in snapshot}
         seen: set[str] = set()
         lang = user.language or DEFAULT_LANGUAGE
@@ -440,35 +492,43 @@ class PeerReviewScheduler:
             existing = all_known.get(item.s21_event_id)
             await self._apply_item(user, item, existing)
 
-        # Disappeared from API → cancelled by platform.
-        for s21_id, row in known_active.items():
-            if s21_id in seen:
-                continue
-            logger.info(
-                "Slot vanished from API: user=%s s21_id=%s db_id=%s",
-                user_id,
-                s21_id,
-                row.id,
-            )
-            if row.id is not None and not self._ends_in_future(row):
-                await self._db.update_event_status(row.id, STATUS_COMPLETED)
-                self._remove_reminder_jobs(row.id)
+        # Only a complete four-source snapshot may prove that an event
+        # vanished. A partial response can add/update bookings but must never
+        # cancel a previously known review.
+        if authoritative:
+            for s21_id, row in known_active.items():
+                if s21_id in seen:
+                    continue
                 logger.info(
-                    "Completed vanished past event user=%s db_id=%s",
+                    "Slot vanished from API: user=%s s21_id=%s db_id=%s",
                     user_id,
+                    s21_id,
                     row.id,
                 )
-                continue
-            if row.id is not None:
-                await self._db.update_event_status(row.id, STATUS_CANCELED)
-                self._remove_reminder_jobs(row.id)
-            start_str, end_str = _split_interval(
-                format_datetime(row.start_time, row.end_time, language=lang)
-            )
-            await self._safe_send(
-                user.telegram_chat_id,
-                f"🗑 Слот на {start_str} - {end_str} был удален",
-                parse_mode=None,
+                if row.id is not None and not self._ends_in_future(row):
+                    await self._db.update_event_status(row.id, STATUS_COMPLETED)
+                    self._remove_reminder_jobs(row.id)
+                    logger.info(
+                        "Completed vanished past event user=%s db_id=%s",
+                        user_id,
+                        row.id,
+                    )
+                    continue
+                if row.id is not None:
+                    await self._db.update_event_status(row.id, STATUS_CANCELED)
+                    self._remove_reminder_jobs(row.id)
+                start_str, end_str = _split_interval(
+                    format_datetime(row.start_time, row.end_time, language=lang)
+                )
+                await self._safe_send(
+                    user.telegram_chat_id,
+                    f"🗑 Слот на {start_str} - {end_str} был удален",
+                    parse_mode=None,
+                )
+        else:
+            logger.warning(
+                "Partial calendar snapshot for user=%s; disappearance checks skipped",
+                user_id,
             )
 
         await self._complete_past_events(user_id, api_by_id)
