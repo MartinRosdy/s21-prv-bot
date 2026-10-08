@@ -75,8 +75,6 @@ _LABELS = {
         "cancel": "❌ Cancel",
         "today": "📅 Today",
         "tomorrow": "📅 Tomorrow",
-        "make_offline": "🏢 Switch to Offline",
-        "make_online": "🌐 Switch to Online",
         "time_unavailable": "Time unavailable",
         "status_free": "⏳ Free",
         "select_now": "🕒 Select current time",
@@ -91,8 +89,6 @@ _LABELS = {
         "cancel": "❌ Отмена",
         "today": "📅 Сегодня",
         "tomorrow": "📅 Завтра",
-        "make_offline": "🏢 Переключить на Офлайн",
-        "make_online": "🌐 Переключить на Онлайн",
         "time_unavailable": "Время недоступно",
         "status_free": "⏳ Свободен",
         "select_now": "🕒 Выбрать текущее время",
@@ -107,8 +103,6 @@ _LABELS = {
         "cancel": "❌ Bekor qilish",
         "today": "📅 Bugun",
         "tomorrow": "📅 Ertaga",
-        "make_offline": "🏢 Offlinega o‘tkazish",
-        "make_online": "🌐 Onlinega o‘tkazish",
         "time_unavailable": "Vaqt mavjud emas",
         "status_free": "⏳ Bo‘sh",
         "select_now": "🕒 Joriy vaqtni tanlash",
@@ -221,7 +215,7 @@ def build_slot_card_kb(
     language: str | None = None,
 ) -> InlineKeyboardMarkup:
     """
-    Slot card detail actions with format toggle and clear navigation.
+    Slot card actions with clear navigation.
     """
     builder = InlineKeyboardBuilder()
     if slot.id is None:
@@ -245,14 +239,6 @@ def build_slot_card_kb(
                     callback_data=f"slot_edit:{slot.id}",
                 ),
             )
-    if slot.status == STATUS_BOOKED:
-        builder.row(
-            InlineKeyboardButton(
-                text=_t(language, "make_online"),
-                callback_data=f"slot_toggle_online:{slot.id}",
-            )
-        )
-
     builder.row(
         InlineKeyboardButton(
             text=_t(language, "back"),

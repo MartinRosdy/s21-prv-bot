@@ -25,7 +25,12 @@ class Settings(BaseSettings):
     bot_token: str = Field(..., alias="BOT_TOKEN")
     encryption_key: str = Field(..., alias="ENCRYPTION_KEY")
     database_path: str = Field(default="data/bot.db", alias="DATABASE_PATH")
-    poll_interval_seconds: int = Field(default=30, alias="POLL_INTERVAL_SECONDS")
+    poll_interval_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=3600,
+        alias="POLL_INTERVAL_SECONDS",
+    )
     school_id: str = Field(
         default="bad03b39-ffd4-4217-9d24-65535fe1f293",
         alias="SCHOOL_ID",
@@ -41,8 +46,6 @@ class Settings(BaseSettings):
         default="https://platform.21-school.ru/services/graphql",
         alias="GRAPHQL_URL",
     )
-    timezone: str = Field(default="Asia/Tashkent", alias="TIMEZONE")
-
     @property
     def db_path(self) -> Path:
         """Absolute path to the SQLite file."""

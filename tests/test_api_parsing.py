@@ -1,9 +1,10 @@
 """Tests for API calendar parsing and event filtering."""
 
+import asyncio
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
-from bot.services.s21_api import S21ApiClient
+from bot.services.s21_api import S21ApiClient, S21ApiError, S21NetworkError
 from bot.database.models import EVENT_TYPE_SLOT, EVENT_TYPE_PEER_REVIEW, STATUS_OPEN, STATUS_BOOKED
 
 
@@ -197,11 +198,91 @@ class TestApiParsing(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("isOnline", mutation)
 
     async def test_create_slot_rejects_empty_success_response(self):
-        from bot.services.s21_api import S21ApiError
-
         self.api._post_mutation = AsyncMock(return_value={"student": {"addEventToTimetable": None}})
         with self.assertRaises(S21ApiError):
             await self.api.create_slot("token", "start", "end")
+
+    async def test_delete_slot_requires_explicit_success(self):
+        self.api._post_mutation = AsyncMock(
+            return_value={"student": {"deleteEventSlot": False}}
+        )
+
+        with self.assertRaises(S21ApiError):
+            await self.api.delete_slot("token", "1010")
+
+        self.api._post_mutation = AsyncMock(
+            return_value={"student": {"deleteEventSlot": True}}
+        )
+        result = await self.api.delete_slot("token", "1010")
+        self.assertTrue(result["student"]["deleteEventSlot"])
+
+    async def test_keycloak_rate_limit_is_transient_not_bad_credentials(self):
+        response = MagicMock(status=429, reason="Too Many Requests")
+        response.text = AsyncMock(return_value='{"error": "rate_limited"}')
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=response)
+        context.__aexit__ = AsyncMock(return_value=None)
+        session = MagicMock()
+        session.post.return_value = context
+        api = S21ApiClient(
+            session,
+            auth_url="https://auth.example.com",
+            graphql_url="https://api.example.com",
+            school_id="dummy-school-id",
+        )
+
+        with self.assertRaises(S21NetworkError):
+            await api.get_access_token("login", "password")
+
+    async def test_http_concurrency_is_capped_across_calendar_sources(self):
+        release = asyncio.Event()
+        reached_limit = asyncio.Event()
+        counters = {"active": 0, "max": 0}
+
+        class Response:
+            status = 200
+
+            async def text(self):
+                return '{"data": {}}'
+
+        class RequestContext:
+            async def __aenter__(self):
+                counters["active"] += 1
+                counters["max"] = max(counters["max"], counters["active"])
+                if counters["active"] == 3:
+                    reached_limit.set()
+                await release.wait()
+                return Response()
+
+            async def __aexit__(self, *_args):
+                counters["active"] -= 1
+
+        session = MagicMock()
+        session.post.side_effect = lambda *_args, **_kwargs: RequestContext()
+        api = S21ApiClient(
+            session,
+            auth_url="https://auth.example.com",
+            graphql_url="https://api.example.com",
+            school_id="dummy-school-id",
+        )
+        tasks = [
+            asyncio.create_task(
+                api._post_query(
+                    "token",
+                    operation_name=f"source{index}",
+                    variables={},
+                    query="query { ok }",
+                )
+            )
+            for index in range(4)
+        ]
+
+        await asyncio.wait_for(reached_limit.wait(), timeout=1)
+        await asyncio.sleep(0)
+        self.assertEqual(counters["active"], 3)
+        self.assertEqual(counters["max"], 3)
+        release.set()
+        await asyncio.gather(*tasks)
 
     def test_parse_valid_booked_peer_review(self):
         booked_event = {

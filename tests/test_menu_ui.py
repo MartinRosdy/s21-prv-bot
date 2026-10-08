@@ -29,7 +29,7 @@ class TestMenuUi(unittest.TestCase):
         )
         self.assertIn("<code>peer&lt;&amp;</code>", text)
         self.assertIn("🔍 Я проверяющий: 2 | 📖 Меня проверяют: 1", text)
-        self.assertIn("А для занятого — переключить на онлайн формат", text)
+        self.assertIn("А для занятого отображается формат Онлайн или Офлайн", text)
 
         keyboard = build_main_menu_kb("ru")
         buttons = [button for row in keyboard.inline_keyboard for button in row]
@@ -93,7 +93,7 @@ class TestMenuUi(unittest.TestCase):
             for row in build_slot_card_kb(slot, "ru").inline_keyboard
             for button in row
         ]
-        self.assertIn("🌐 Переключить на Онлайн", button_texts)
+        self.assertNotIn("🌐 Переключить на Онлайн", button_texts)
 
     def test_first_start_and_auth_prompts_are_short(self):
         self.assertEqual(
@@ -136,7 +136,7 @@ class TestMenuUi(unittest.TestCase):
         exact = "2. ⏳ За 15 минут: напоминание с никнеймом пира, ролью и форматом"
         self.assertIn(exact, text)
         self.assertNotIn("кнопка смены формата", text.lower())
-        self.assertIn("Для занятого слота можно сменить формат на онлайн", text)
+        self.assertIn("Для записи показывается формат Онлайн или Офлайн", text)
         self.assertIn(
             "• 🔍 Я проверяющий (Evaluator): твои открытые ревью слоты, где ты оцениваешь чужой проект",
             text,

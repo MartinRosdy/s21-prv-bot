@@ -10,7 +10,7 @@ from typing import Optional
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -55,6 +55,10 @@ _NOTIFICATION_TEXTS = {
         "t15": "Peer review starts in 15 minutes!",
         "t2": "Peer review starts in 2 minutes!",
         "t0": "Peer review starts now!",
+        "auth_failed": "⚠️ Could not sign in to School 21. Check your platform credentials with /login",
+        "slot_created": "⏳ New slot created: {start} - {end}. Waiting for a peer",
+        "slot_deleted": "🗑 Slot at {start} - {end} was deleted",
+        "slot_moved": "🔄 Slot time was changed on the platform.\nNew time: {start} - {end}",
     },
     "ru": {
         "unknown": "неизвестный пир", "online": "Онлайн", "offline": "Офлайн",
@@ -66,6 +70,10 @@ _NOTIFICATION_TEXTS = {
         "t15": "Пир-ревью начнется через 15 минут!",
         "t2": "Напоминание: Пир-Ревью через 2 минуты!",
         "t0": "Пир-Ревью начинается прямо сейчас!",
+        "auth_failed": "⚠️ Не удалось войти в платформу Школы 21. Проверь логин и пароль командой /login",
+        "slot_created": "⏳ Создан новый слот: {start} - {end}. Ждём пира",
+        "slot_deleted": "🗑 Слот на {start} - {end} был удалён",
+        "slot_moved": "🔄 Время слота изменено на платформе.\nНовое время: {start} - {end}",
     },
     "uz": {
         "unknown": "noma’lum peer", "online": "Online", "offline": "Offline",
@@ -77,6 +85,10 @@ _NOTIFICATION_TEXTS = {
         "t15": "Peer-review 15 daqiqadan so‘ng boshlanadi!",
         "t2": "Peer-review 2 daqiqadan so‘ng boshlanadi!",
         "t0": "Peer-review hozir boshlanadi!",
+        "auth_failed": "⚠️ School 21 platformasiga kirib bo‘lmadi. Login va parolni /login orqali tekshiring",
+        "slot_created": "⏳ Yangi slot yaratildi: {start} - {end}. Peer kutilmoqda",
+        "slot_deleted": "🗑 {start} - {end} dagi slot o‘chirildi",
+        "slot_moved": "🔄 Slot vaqti platformada o‘zgartirildi.\nYangi vaqt: {start} - {end}",
     },
 }
 
@@ -159,32 +171,6 @@ def _event_identity_keys(
     return tuple(keys)
 
 
-def _format_toggle_markup(
-    event: TrackedEvent,
-    language: str | None,
-) -> InlineKeyboardMarkup | None:
-    """Format action for any booked review, regardless of time to start."""
-    if event.id is None or event.status != STATUS_BOOKED:
-        return None
-    lang = language if language in {"en", "ru", "uz"} else DEFAULT_LANGUAGE
-    labels = {
-        "en": "🌐 Switch to Online",
-        "ru": "🌐 Переключить на Онлайн",
-        "uz": "🌐 Onlinega o‘tkazish",
-    }
-    text = labels[lang]
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=f"slot_toggle_online:{event.id}",
-                )
-            ]
-        ]
-    )
-
-
 class PeerReviewScheduler:
     """
     Two responsibilities:
@@ -210,10 +196,14 @@ class PeerReviewScheduler:
         self._api = api
         self._poll_interval = poll_interval_seconds
         self._scheduler = AsyncIOScheduler(timezone="UTC")
-        # Cap concurrent School 21 API calls to avoid HTTP 429.
+        # Cap concurrent user-level sync batches; S21ApiClient independently
+        # enforces the actual global HTTP request limit.
         self._api_semaphore = asyncio.Semaphore(3)
         # Forced refreshes from handlers may overlap the interval poll.
         self._user_locks: dict[int, asyncio.Lock] = {}
+        # Avoid repeating an actionable bad-credentials warning on every poll.
+        # A successful authentication (or logout) clears the in-memory guard.
+        self._auth_warning_sent: set[int] = set()
 
     def start(self) -> None:
         self._scheduler.add_job(
@@ -258,6 +248,7 @@ class PeerReviewScheduler:
         for chat_id, lock in list(self._user_locks.items()):
             if chat_id not in active_user_ids and not lock.locked():
                 self._user_locks.pop(chat_id, None)
+                self._auth_warning_sent.discard(chat_id)
         if not users:
             logger.debug("Poll skipped: no registered users")
             return
@@ -274,7 +265,7 @@ class PeerReviewScheduler:
                     user.s21_login,
                 )
 
-        # Concurrent per-user polls; semaphore limits API fan-out to 3.
+        # Concurrent per-user polls; _process_user bounds active sync batches.
         await asyncio.gather(*(_safe_poll(user) for user in users))
 
     async def _process_user(self, user: User) -> None:
@@ -291,11 +282,12 @@ class PeerReviewScheduler:
         snapshot_complete = False
         token: Optional[str] = None
 
-        # Auth + calendarGetEvents share one semaphore slot (max 3 in flight).
+        # Auth + the four-source calendar fetch share one user-batch slot.
         async with self._api_semaphore:
             try:
                 password = self._crypto.decrypt(user.encrypted_password)
                 token = await self._api.get_access_token(user.s21_login, password)
+                self._auth_warning_sent.discard(user.telegram_chat_id)
             except S21NetworkError as exc:
                 logger.warning(
                     "Auth network blip for chat_id=%s: %s",
@@ -309,11 +301,16 @@ class PeerReviewScheduler:
                     user.telegram_chat_id,
                     exc,
                 )
-                await self._safe_send(
-                    user.telegram_chat_id,
-                    "⚠️ Не удалось войти в платформу Школы 21. "
-                    "Проверь логин и пароль от платформы Школы 21 командой /login",
-                )
+                if user.telegram_chat_id not in self._auth_warning_sent:
+                    delivered = await self._safe_send(
+                        user.telegram_chat_id,
+                        _NOTIFICATION_TEXTS[
+                            _notification_language(user.language)
+                        ]["auth_failed"],
+                        parse_mode=None,
+                    )
+                    if delivered:
+                        self._auth_warning_sent.add(user.telegram_chat_id)
                 return
             finally:
                 password = None
@@ -367,37 +364,47 @@ class PeerReviewScheduler:
                 len(plan.slots_to_delete),
             )
             if token:
-                for u in plan.slots_to_update:
-                    try:
-                        await self._api.update_slot(
-                            token,
-                            str(u["event_slot_id"]),
-                            u["new_start_utc"],
-                            u["new_end_utc"],
-                        )
-                    except Exception as exc:
-                        logger.warning("Failed to sync updated split slot on API: %s", exc)
-
-                for c in plan.slots_to_create:
-                    try:
-                        await self._api.create_slot(
-                            token,
-                            c["new_start_utc"],
-                            c["new_end_utc"],
-                        )
-                    except Exception as exc:
-                        logger.warning("Failed to sync created split slot on API: %s", exc)
-
-                for d in plan.slots_to_delete:
-                    try:
-                        await self._api.delete_slot(token, str(d["event_slot_id"]))
-                    except Exception as exc:
-                        logger.warning("Failed to delete split slot on API: %s", exc)
-
-                # A batch may succeed only partially. Always re-read platform
-                # truth so the next reconciliation neither stores a synthetic
-                # plan nor repeats already successful create operations.
+                # Splitting performs mutations too, so keep the same global
+                # concurrency bound used by authentication and calendar reads.
                 async with self._api_semaphore:
+                    for u in plan.slots_to_update:
+                        try:
+                            await self._api.update_slot(
+                                token,
+                                str(u["event_slot_id"]),
+                                u["new_start_utc"],
+                                u["new_end_utc"],
+                            )
+                        except (S21ApiError, S21NetworkError) as exc:
+                            logger.warning(
+                                "Failed to sync updated split slot on API: %s", exc
+                            )
+
+                    for c in plan.slots_to_create:
+                        try:
+                            await self._api.create_slot(
+                                token,
+                                c["new_start_utc"],
+                                c["new_end_utc"],
+                            )
+                        except (S21ApiError, S21NetworkError) as exc:
+                            logger.warning(
+                                "Failed to sync created split slot on API: %s", exc
+                            )
+
+                    for d in plan.slots_to_delete:
+                        try:
+                            await self._api.delete_slot(
+                                token, str(d["event_slot_id"])
+                            )
+                        except (S21ApiError, S21NetworkError) as exc:
+                            logger.warning(
+                                "Failed to delete split slot on API: %s", exc
+                            )
+
+                    # A batch may succeed only partially. Always re-read platform
+                    # truth so the next reconciliation neither stores a synthetic
+                    # plan nor repeats already successful create operations.
                     try:
                         refresh_result = await self._api.fetch_calendar_events(
                             token,
@@ -522,7 +529,10 @@ class PeerReviewScheduler:
                 )
                 await self._safe_send(
                     user.telegram_chat_id,
-                    f"🗑 Слот на {start_str} - {end_str} был удален",
+                    _NOTIFICATION_TEXTS[lang]["slot_deleted"].format(
+                        start=start_str,
+                        end=end_str,
+                    ),
                     parse_mode=None,
                 )
         else:
@@ -594,8 +604,6 @@ class PeerReviewScheduler:
         user_id: int,
         saved: TrackedEvent,
         text: str,
-        *,
-        language: str | None = None,
     ) -> bool:
         """Atomically claim and send a future booking notification once."""
         if saved.id is None or not self._starts_in_future(saved):
@@ -623,13 +631,19 @@ class PeerReviewScheduler:
                 saved.id,
             )
             return False
-        await self._safe_send(
+        delivered = await self._safe_send(
             user_id,
             text,
             parse_mode="HTML",
-            reply_markup=_format_toggle_markup(saved, language),
         )
-        return True
+        if delivered:
+            return True
+
+        # Claim-before-send prevents duplicate concurrent notifications, but a
+        # transient Telegram failure must not permanently suppress the alert.
+        # Releasing only our booking-specific claim lets the next poll retry.
+        await self._db.release_event_notification(saved.id, booking_id)
+        return False
 
     async def _apply_item(
         self,
@@ -685,7 +699,10 @@ class PeerReviewScheduler:
             start_str, end_str = _split_interval(when)
             await self._safe_send(
                 user.telegram_chat_id,
-                f"⏳ Создан новый слот: {start_str} - {end_str}. Ждем пира",
+                _NOTIFICATION_TEXTS[lang]["slot_created"].format(
+                    start=start_str,
+                    end=end_str,
+                ),
                 parse_mode=None,
             )
             return
@@ -722,9 +739,7 @@ class PeerReviewScheduler:
                 is_online,
                 language=lang,
             )
-            await self._notify_booking_once(
-                user_id, saved, text, language=lang
-            )
+            await self._notify_booking_once(user_id, saved, text)
             # Instant-notification idempotency is independent from reminder
             # restoration (e.g. after a process restart or reschedule).
             self._schedule_reminders(saved)
@@ -758,9 +773,7 @@ class PeerReviewScheduler:
                 is_online,
                 language=lang,
             )
-            await self._notify_booking_once(
-                user_id, saved, text, language=lang
-            )
+            await self._notify_booking_once(user_id, saved, text)
             self._schedule_reminders(saved)
             return
 
@@ -798,8 +811,10 @@ class PeerReviewScheduler:
                     new_start, new_end = _split_interval(when)
                     await self._safe_send(
                         user_id,
-                        "🔄 Время слота было изменено на платформе.\n"
-                        f"Новое время: {new_start} - {new_end}",
+                        _NOTIFICATION_TEXTS[lang]["slot_moved"].format(
+                            start=new_start,
+                            end=new_end,
+                        ),
                         parse_mode=None,
                     )
                     # Reschedule reminders if the booked slot moved.
@@ -927,11 +942,6 @@ class PeerReviewScheduler:
             row.user_id,
             text,
             parse_mode="HTML",
-            reply_markup=(
-                _format_toggle_markup(row, lang)
-                if minutes_before == 15
-                else None
-            ),
         )
         logger.info(
             "Reminder sent user=%s db_id=%s T-%s",
@@ -1021,7 +1031,7 @@ class PeerReviewScheduler:
         *,
         parse_mode: Optional[str] = "Markdown",
         reply_markup: InlineKeyboardMarkup | None = None,
-    ) -> None:
+    ) -> bool:
         try:
             await self.bot.send_message(
                 chat_id,
@@ -1029,5 +1039,7 @@ class PeerReviewScheduler:
                 parse_mode=parse_mode,
                 reply_markup=reply_markup,
             )
+            return True
         except TelegramAPIError as exc:
             logger.warning("Failed to send message to %s: %s", chat_id, exc)
+            return False

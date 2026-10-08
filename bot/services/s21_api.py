@@ -280,6 +280,10 @@ class S21ApiClient:
         self._graphql_url = graphql_url.rstrip("?")
         self._school_id = school_id
         self._user_agent = user_agent
+        # One client is shared by every user. Calendar sync fans out to four
+        # GraphQL sources, so limit actual HTTP requests here rather than only
+        # limiting the number of user-level scheduler jobs.
+        self._request_semaphore = asyncio.Semaphore(3)
 
     async def get_access_token(self, username: str, password: str) -> str:
         """
@@ -299,38 +303,39 @@ class S21ApiClient:
         }
 
         try:
-            async with self._session.post(
-                self._auth_url,
-                data=form,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                text = await resp.text()
-                try:
-                    parsed = json.loads(text) if text else {}
-                except json.JSONDecodeError as exc:
-                    raise S21NetworkError(
-                        f"Keycloak returned invalid JSON ({resp.status})"
-                    ) from exc
-                body = parsed if isinstance(parsed, dict) else {}
-                if resp.status >= 500:
-                    raise S21NetworkError(
-                        f"Keycloak temporary HTTP error: {resp.status}"
-                    )
-                if resp.status != 200:
-                    error = (
-                        body.get("error_description")
-                        or body.get("error")
-                        or resp.reason
-                    )
-                    raise S21AuthError(
-                        f"Keycloak auth failed ({resp.status}): {error}"
-                    )
+            async with self._request_semaphore:
+                async with self._session.post(
+                    self._auth_url,
+                    data=form,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    text = await resp.text()
+                    try:
+                        parsed = json.loads(text) if text else {}
+                    except json.JSONDecodeError as exc:
+                        raise S21NetworkError(
+                            f"Keycloak returned invalid JSON ({resp.status})"
+                        ) from exc
+                    body = parsed if isinstance(parsed, dict) else {}
+                    if resp.status in {408, 425, 429} or resp.status >= 500:
+                        raise S21NetworkError(
+                            f"Keycloak temporary HTTP error: {resp.status}"
+                        )
+                    if resp.status != 200:
+                        error = (
+                            body.get("error_description")
+                            or body.get("error")
+                            or resp.reason
+                        )
+                        raise S21AuthError(
+                            f"Keycloak auth failed ({resp.status}): {error}"
+                        )
 
-                token = body.get("access_token")
-                if not token:
-                    raise S21AuthError("Keycloak response has no access_token")
-                return str(token)
+                    token = body.get("access_token")
+                    if not token:
+                        raise S21AuthError("Keycloak response has no access_token")
+                    return str(token)
         except S21AuthError:
             raise
         except S21NetworkError:
@@ -538,23 +543,24 @@ class S21ApiClient:
         )
 
         try:
-            async with self._session.post(
-                self._graphql_operation_url(operation_name),
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=45),
-            ) as resp:
-                text = await resp.text()
-                try:
-                    body: Any = json.loads(text) if text else None
-                except json.JSONDecodeError:
-                    body = None
+            async with self._request_semaphore:
+                async with self._session.post(
+                    self._graphql_operation_url(operation_name),
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=45),
+                ) as resp:
+                    text = await resp.text()
+                    try:
+                        body: Any = json.loads(text) if text else None
+                    except json.JSONDecodeError:
+                        body = None
 
-                if resp.status != 200:
-                    preview = (text or "")[:300]
-                    raise S21ApiError(
-                        f"GraphQL HTTP {resp.status}: {preview or body!r}"
-                    )
+                    if resp.status != 200:
+                        preview = (text or "")[:300]
+                        raise S21ApiError(
+                            f"GraphQL HTTP {resp.status}: {preview or body!r}"
+                        )
         except _NETWORK_ERRORS as exc:
             # Balancer blips, timeouts, ClientOSError reset-by-peer, etc.
             logger.warning("GraphQL query %s network error: %s", operation_name, exc)
@@ -617,23 +623,24 @@ class S21ApiClient:
         )
 
         try:
-            async with self._session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=45),
-            ) as resp:
-                text = await resp.text()
-                try:
-                    body: Any = json.loads(text) if text else None
-                except json.JSONDecodeError:
-                    body = None
+            async with self._request_semaphore:
+                async with self._session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=45),
+                ) as resp:
+                    text = await resp.text()
+                    try:
+                        body: Any = json.loads(text) if text else None
+                    except json.JSONDecodeError:
+                        body = None
 
-                if resp.status != 200:
-                    preview = (text or "")[:300]
-                    raise S21ApiError(
-                        f"GraphQL HTTP {resp.status}: {preview or body!r}"
-                    )
+                    if resp.status != 200:
+                        preview = (text or "")[:300]
+                        raise S21ApiError(
+                            f"GraphQL HTTP {resp.status}: {preview or body!r}"
+                        )
         except _NETWORK_ERRORS as exc:
             raise S21NetworkError(
                 f"GraphQL mutation network error ({operation_name}): {exc}"
@@ -741,25 +748,19 @@ class S21ApiClient:
     __typename
   }
 }"""
-        return await self._post_mutation(
+        data = await self._post_mutation(
             token,
             operation_name="calendarDeleteEventSlot",
             variables={"eventSlotId": self._as_slot_id_int(slot_id)},
             query=query_str,
         )
-
-    async def toggle_online(
-        self, token: str, booking_id: str, is_online: bool
-    ) -> Any:
-        """TODO: wire the confirmed booking-format mutation when available."""
-        logger.info(
-            "Booking format change unavailable: booking_id=%s is_online=%s",
-            booking_id,
-            is_online,
-        )
-        raise NotImplementedError(
-            "The archive does not contain a booking format mutation"
-        )
+        if not isinstance(data, dict) or not isinstance(data.get("student"), dict):
+            raise S21ApiError("calendarDeleteEventSlot returned no student result")
+        # The mutation returns a boolean. Require an explicit True so an empty
+        # or rejected response is never reported to the user as a deletion.
+        if data["student"].get("deleteEventSlot") is not True:
+            raise S21ApiError("calendarDeleteEventSlot did not delete the slot")
+        return data
 
     # ------------------------------------------------------------------ parse
 

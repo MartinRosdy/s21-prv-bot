@@ -47,6 +47,15 @@ class TestDatabase(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(
                     await db.claim_event_notification(event_id, "booking-2")
                 )
+                self.assertFalse(
+                    await db.release_event_notification(event_id, "booking-1")
+                )
+                self.assertTrue(
+                    await db.release_event_notification(event_id, "booking-2")
+                )
+                self.assertTrue(
+                    await db.claim_event_notification(event_id, "booking-2")
+                )
 
                 await db.upsert_event(
                     TrackedEvent(

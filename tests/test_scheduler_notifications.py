@@ -2,7 +2,7 @@
 
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from bot.database.models import (
     EVENT_TYPE_PEER_REVIEW,
     EVENT_TYPE_SLOT,
@@ -18,6 +18,7 @@ from bot.services.scheduler import (
     PeerReviewScheduler,
     _build_booked_instant_text,
 )
+from bot.services.s21_api import S21AuthError
 
 
 class TestSchedulerNotifications(unittest.IsolatedAsyncioTestCase):
@@ -116,6 +117,26 @@ class TestSchedulerNotifications(unittest.IsolatedAsyncioTestCase):
 
 
 class TestBookingNotificationGuard(unittest.IsolatedAsyncioTestCase):
+    async def test_bad_credentials_warning_is_not_repeated_each_poll(self):
+        api = AsyncMock()
+        api.get_access_token.side_effect = S21AuthError("bad credentials")
+        crypto = MagicMock()
+        crypto.decrypt.return_value = "secret"
+        scheduler = PeerReviewScheduler(
+            bot=AsyncMock(),
+            db=AsyncMock(),
+            crypto=crypto,
+            api=api,
+        )
+        scheduler._safe_send = AsyncMock(return_value=True)
+        user = User(100, "mylogin", "encrypted", language="en")
+
+        await scheduler._process_user_locked(user)
+        await scheduler._process_user_locked(user)
+
+        scheduler._safe_send.assert_awaited_once()
+        self.assertIn("Could not sign in", scheduler._safe_send.await_args.args[1])
+
     async def test_reconcile_matches_booking_source_to_existing_slot_alias(self):
         db = AsyncMock()
         existing = TrackedEvent(
@@ -209,12 +230,69 @@ class TestBookingNotificationGuard(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await scheduler._notify_booking_once(100, event, "new"))
         self.assertFalse(await scheduler._notify_booking_once(100, event, "new"))
         bot.send_message.assert_awaited_once()
-        markup = bot.send_message.await_args.kwargs["reply_markup"]
-        self.assertEqual(
-            markup.inline_keyboard[0][0].callback_data,
-            "slot_toggle_online:10",
-        )
+        self.assertIsNone(bot.send_message.await_args.kwargs["reply_markup"])
         db.claim_event_notification.assert_any_await(10, "future")
+
+    async def test_failed_delivery_releases_claim_for_next_poll(self):
+        db = AsyncMock()
+        db.claim_event_notification = AsyncMock(return_value=True)
+        scheduler = PeerReviewScheduler(
+            bot=AsyncMock(),
+            db=db,
+            crypto=None,  # type: ignore
+            api=None,  # type: ignore
+        )
+        scheduler._safe_send = AsyncMock(return_value=False)
+        event = TrackedEvent(
+            id=15,
+            user_id=100,
+            s21_event_id="future-failed-send",
+            type=EVENT_TYPE_PEER_REVIEW,
+            status=STATUS_BOOKED,
+            start_time="2999-10-02T19:30:00.000Z",
+            data={"booking_id": "booking-15"},
+        )
+
+        self.assertFalse(await scheduler._notify_booking_once(100, event, "new"))
+        db.release_event_notification.assert_awaited_once_with(15, "booking-15")
+
+    async def test_operational_notifications_follow_user_language(self):
+        db = AsyncMock()
+        db.upsert_event = AsyncMock(
+            return_value=TrackedEvent(
+                id=22,
+                user_id=100,
+                s21_event_id="open-en",
+                type=EVENT_TYPE_SLOT,
+                status=STATUS_OPEN,
+                start_time="2999-10-02T19:00:00.000Z",
+                end_time="2999-10-02T20:00:00.000Z",
+                role=ROLE_EVALUATOR,
+            )
+        )
+        bot = AsyncMock()
+        scheduler = PeerReviewScheduler(
+            bot=bot,
+            db=db,
+            crypto=None,  # type: ignore
+            api=None,  # type: ignore
+        )
+        item = CalendarSnapshotItem(
+            s21_event_id="open-en",
+            type=EVENT_TYPE_SLOT,
+            status=STATUS_OPEN,
+            start_time="2999-10-02T19:00:00.000Z",
+            end_time="2999-10-02T20:00:00.000Z",
+            role=ROLE_EVALUATOR,
+        )
+
+        await scheduler._apply_item(
+            User(100, "mylogin", "encrypted", language="en"), item, None
+        )
+
+        sent_text = bot.send_message.await_args.args[1]
+        self.assertIn("New slot created", sent_text)
+        self.assertNotIn("Создан новый слот", sent_text)
 
     async def test_past_booking_is_completed_without_notification(self):
         db = AsyncMock()

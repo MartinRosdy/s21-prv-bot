@@ -549,6 +549,31 @@ class Database:
             )
         return changed == 1
 
+    async def release_event_notification(
+        self,
+        event_id: int,
+        booking_id: str,
+    ) -> bool:
+        """Release a claim when Telegram delivery failed.
+
+        The booking id predicate prevents a delayed failure from clearing a
+        newer claim made for the same event row.
+        """
+        async with self.transaction() as connection:
+            changed = await self._execute_write(
+                connection,
+                """
+                UPDATE events
+                SET is_notified = 0,
+                    notified_booking_id = NULL,
+                    updated_at = datetime('now')
+                WHERE id = ?
+                  AND notified_booking_id = ?
+                """,
+                (event_id, booking_id),
+            )
+        return changed == 1
+
     async def update_event_status(
         self,
         event_id: int,

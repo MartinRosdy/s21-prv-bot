@@ -25,18 +25,18 @@ _MENU_BUTTONS = {
 _REVIEWS_DESC = {
     LANG_EN: (
         "Your peer-review slots list. Create a slot via step-by-step "
-        "date/time picker, reschedule or delete a slot, and for a booked "
-        "one — switch it to online format"
+        "date/time picker, reschedule or delete an open slot, and see the "
+        "Online/Offline format of a booking"
     ),
     LANG_RU: (
         "Список твоих слотов на пир-ревью. Можно создать слот через "
         "пошаговый выбор даты и времени, изменить время или удалить слот, "
-        "а для занятого — переключить на онлайн формат"
+        "а для занятого — увидеть формат Онлайн или Офлайн"
     ),
     LANG_UZ: (
         "Peer-review slotlaringiz ro‘yxati. Slotni sana/vaqt tanlash "
-        "orqali yarating, vaqtini o‘zgartiring yoki o‘chiring, band "
-        "bo‘lsa — onlayn formatga o‘tkazing"
+        "orqali yarating, vaqtini o‘zgartiring yoki o‘chiring; band "
+        "slotda Online/Offline formatini ko‘ring"
     ),
 }
 
@@ -48,7 +48,7 @@ _MAIN_MENU_TEXT = {
         "🔍 I am checking: {evaluator_count} | 📖 Being checked: {evaluated_count}\n\n"
         "📋 My slots — Your peer-review slots\n"
         "Create a slot by choosing a date and time, change or delete an open slot\n"
-        "For a booked slot — switch it to online format\n\n"
+        "A booked slot shows its Online or Offline format\n\n"
         "ℹ️ Use /help to see all commands"
     ),
     LANG_RU: (
@@ -58,7 +58,7 @@ _MAIN_MENU_TEXT = {
         "🔍 Я проверяющий: {evaluator_count} | 📖 Меня проверяют: {evaluated_count}\n\n"
         "📋 Мои слоты — Список твоих слотов на пир-ревью\n"
         "Можно создать слот через пошаговый выбор даты и времени, изменить время или удалить слот\n"
-        "А для занятого — переключить на онлайн формат\n\n"
+        "А для занятого отображается формат Онлайн или Офлайн\n\n"
         "ℹ️ Используй /help для просмотра всех команд"
     ),
     LANG_UZ: (
@@ -68,7 +68,7 @@ _MAIN_MENU_TEXT = {
         "🔍 Men tekshiruvchiman: {evaluator_count} | 📖 Meni tekshirishadi: {evaluated_count}\n\n"
         "📋 Mening slotlarim — Peer-review slotlaringiz ro‘yxati\n"
         "Sana va vaqtni tanlab slot yaratish, o‘zgartirish yoki o‘chirish mumkin\n"
-        "Band slotni onlayn formatga o‘tkazish mumkin\n\n"
+        "Band slotda Online yoki Offline formati ko‘rsatiladi\n\n"
         "ℹ️ Barcha buyruqlarni ko‘rish uchun /help dan foydalaning"
     ),
 }
